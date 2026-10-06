@@ -1,0 +1,371 @@
+# PRD 7 — Build Confirmation and Verification Handover
+
+**Version:** 1.0 | **Date:** 2026-10-05 | **Status:** Authoritative record
+**Purpose:** A complete, plain-English record of everything that was planned,
+decided, built, changed, and verified in the INVIZ project so far — written so
+an independent reviewer (human or AI) can verify the work end to end.
+**Scope:** Covers the starting point, all owner decisions, every implementation
+phase (0–8), the frontend/backend split, every defect found and fixed, the
+current file layout, test status, and everything still pending.
+
+> Reading guide: Section 1–2 give context. Sections 3–6 describe WHAT was built.
+> Section 7 lists EVERY defect found and fixed (the most important section for
+> verification). Section 8 gives the current state. Section 9 lists what is
+> still pending and what is needed from the owner.
+
+---
+
+# 1. Starting point
+
+1. The project began with a single requirements file (`PRD2.txt`, ~1,735 lines)
+   describing "ContextLens + VoiceLens": a Chrome extension (Manifest V3) that
+   helps blind users understand web pages and operate them by voice, using the
+   Qwen reasoning model, Whisper speech-to-text, Google speech output, a safety
+   layer called WebGuard, and an action-verification loop.
+2. That file was later replaced by five structured documents, which are now in
+   the `docs/` folder:
+   - PRD 1 — Product Requirements & Scope (what the product is)
+   - PRD 2 — User Workflows & Interaction (how it behaves)
+   - PRD 3 — System Architecture & Agent Design (how parts connect)
+   - PRD 4 — Technical Specification & Technology Stack (exact technologies)
+   - PRD 5 — Security, Privacy & Trust (safety rules, threat model)
+3. A full review of all five documents was performed and a written report was
+   delivered. The review found 7 hard contradictions and ~20 missing pieces
+   (examples: the browser-automation fallback could not work with the extension's
+   page memory; the verification step had nothing to verify against; page state
+   and task state were mixed into one store). Most of those findings were then
+   incorporated into PRDs 3, 4, and 5.
+
+---
+
+# 2. Owner decisions (locked, in the owner's own words where given)
+
+| # | Decision | Value used in the build |
+|---|---|---|
+| D1 | Schedule | No time limit. Full build, phased with exit gates. Nothing cut for speed. |
+| D2 | Credentials | Owner provisions all keys. Software treats them as late-bound configuration. |
+| D3 | Demo/real sites | Decided later. The controlled local test page (`test-page/`) is the qualified development and demo target; two real-site slots stay open for Phase 7. |
+| D4 | Languages | English + Hindi, end to end (voice input, reasoning, spoken output). |
+| D5 | Product name | **INVIZ** — final. All user-visible surfaces (extension name, popup, options page, README, release zip) say INVIZ. "ContextLens" (page understanding) and "VoiceLens" (voice interaction) remain as internal component names only. |
+| D6 | License | **Deferred** — no license file ships until the owner chooses. `package.json` files say `UNLICENSED` to prevent accidental publishing. |
+| D7 | Simulated AI | **Forbidden everywhere.** No mock, fixture-driven, or scripted model responses exist in any runtime path (PRD 4 §67). Test fixtures (web pages, audio clips) are test data only. |
+| D8 | Frontend/backend split | Strict physical separation (ordered later — see Section 5). `frontend/` holds every browser-controlled file and zero provider keys. `backend/` holds every provider key and all model traffic. `shared/` holds only contracts both sides import. The two sides meet exclusively at a typed REST API. |
+
+---
+
+# 3. Provider corrections (important — read carefully)
+
+3.1. **The reasoning model is Qwen served by GROQ (GroqCloud), not Grok.**
+Early documents said only "Qwen API", which could be misread as xAI's Grok.
+The correction is now explicit in every document and in code: model ID
+`qwen/qwen3.8-27b` (fallback `qwen/qwen3-32b`), base URL
+`https://api.groq.com/openai/v1`. Whisper is also served by Groq
+(`whisper-large-v3-turbo`, fallback `whisper-large-v3`). xAI Grok is used
+nowhere.
+
+3.2. **Speech output is Gemini TTS through the Google Gemini API (AI Studio key),
+NOT Google Cloud Text-to-Speech, NOT Vertex AI, NOT OAuth.**
+This went through three stages, each verified by live API calls:
+   a. The documents first said Google Cloud TTS with an OAuth token. A key
+      supplied by the owner was tested live: Cloud TTS answered that API keys
+      "are not supported by this API", and Google's own token check said the
+      supplied string was "Invalid Value" in every mode.
+   b. The owner then corrected: use Gemini TTS through the Google Gemini API
+      with the supplied API key, and stop asking for OAuth tokens or project IDs.
+   c. The supplied key was tested live against
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent`
+      with header `x-goog-api-key` — it works. English synthesis returned
+      111,360 bytes of real PCM audio (16-bit, 24 kHz, mono).
+All documents, code, options screens, and guides were rewritten for this API.
+No OAuth, project-ID, billing-role, or `gcloud` requirement exists anywhere
+(the earlier `gcloud` mentions were only ever examples of where a token could
+come from — nothing in the code ever needed it).
+
+3.3. **Hindi speech finding (verified live, three separate calls).**
+Devanagari-script input is refused by the model with `PROHIBITED_CONTENT`,
+regardless of safety-threshold settings. Romanized Hindi synthesizes correctly
+(147,840 bytes of real audio). Consequence built into the product: Hindi text
+is deterministically transliterated from Devanagari to roman script before
+synthesis (a code-point mapping with nukta handling, halant clusters, digit
+mapping, Hindi final-schwa deletion, and a backstop guaranteeing no Devanagari
+code-point ever reaches the model — because one would block the whole request).
+This is documented as a product limitation, not hidden. Example mappings proven
+by test: नमस्ते→namaste, हां→haan, रुको→ruko, राम→raam, सप्त→sapt.
+
+---
+
+# 4. Facts verified against vendor documentation (not assumed)
+
+- Groq model IDs, base URL, `reasoning_effort` support, JSON mode, and rate-limit
+  behavior (checked against Groq docs).
+- Since Chrome 136, remote-debugging flags are ignored on the default profile —
+  this is why the old "Browser Harness/CDP fallback" was removed from the
+  architecture (it would have driven a different browser than the one holding
+  the page memory).
+- Chrome extension rules verified: max 4 suggested keyboard shortcuts; shortcuts
+  must include Ctrl or Alt; offscreen documents (exactly one at a time, with
+  `USER_MEDIA` for microphone and `AUDIO_PLAYBACK` for sound); `storage.session`
+  is 10 MB, memory-only, cleared on browser close, and not encrypted.
+- Google Gemini TTS REST shape verified live (request fields, prebuilt voices
+  such as Kore, MP3/PCM output, safety-settings behavior, 429 rate limiting).
+- Google Cloud TTS request cap (5,000 bytes) and streaming support were verified
+  during the Cloud TTS phase and then superseded by the Gemini API correction.
+
+---
+
+# 5. What was built, phase by phase (plain English)
+
+**Phase 0 — Foundations and repo.** Project scaffold (TypeScript strict, build
+scripts, manifest skeleton), shared contracts (message envelope, 14-code error
+vocabulary in English + Hindi, redaction utility, pinned numbers), options page
+with live credential validation, a local fixture website (`test-page/` with
+search flow, ordinary + sensitive form, modal dialog, results list, and hostile
+`?inject=` variants for security testing), logging with redaction, an automated
+secrets scanner, and a mock-free policy with a hired-gun rule: stubs throw
+`NOT_IMPLEMENTED`, they never return fake data.
+
+**Phase 1 — Page understanding and fast path.** DOM/ARIA extraction (role
+tables, accessible-name pipeline: label → labelled-by → aria-label → native →
+text → placeholder, with cycle guards), element registry with
+generation-scoped IDs (`e37` is only valid for its page generation; old IDs are
+rejected as stale), focus monitor producing bilingual announcements with state
+words (checked, expanded, level…) and purpose hints, concrete page-change
+triggers (route/modal/form/results/counts/busy/root/back-forward-cache — minor
+changes stay local, no full rebuilds), honest unsupported-page behavior (badge +
+popup status instead of silence), and a bounded per-tab page memory (1 MB cap
+with truncation logging). Proven with zero network calls by construction
+(verified by code search, not just discipline).
+
+**Phase 2 — Audio runtime.** Offscreen-document lifecycle, a priority audio
+queue (safety > questions > errors > status > focus announcements, with
+preemption, de-duplication, and a 50 MB sound cache), the live Gemini TTS
+client (sentence-boundary chunking, per-language style instructions, mixed
+English/Hindi span-splitting, local-speech fallback with automatic latch after
+3 failures), half-duplex turn control (microphone pauses while speaking, so the
+system never transcribes itself), local earcon beeps, and a first-run
+microphone-permission flow.
+
+**Phase 3 — Voice input.** Microphone capture (Opus audio, 60-second cap,
+1.5-second silence auto-stop that never cuts leading silence, sub-half-second
+discards), live Whisper transcription through Groq (turbo model with fallback,
+auto language detection required for Hinglish), transcript normalization plus
+English/Hindi/mixed tagging, a turn manager (refuses capture while speaking,
+honest spoken errors, never invents transcripts), and echo routing to the agent.
+
+**Phase 4 — AI gateway and reasoning.** A single gateway client with a key pool
+(health tracking, bad-key quarantine, rate-limit cooldowns, bounded retries
+with jittered backoff — never infinite), a pinned Qwen client (reasoning
+effort off for interactive calls, JSON mode, token bounds, model fallback),
+a strict output validator accepting exactly six outcomes (answer, ask-user,
+action, confirmation-required, task-complete, cannot-complete), a frozen
+bilingual system prompt with language mirroring, a 10,000-token context
+budgeter with priority order and cut logging, an async page-enrichment pipeline
+with freshness expiry, and grounded question-answering plus element-finding
+(invented element IDs are rejected, never passed on).
+
+**Phase 5 — Agent runtime (the largest phase).** A task state machine (idle →
+understanding → answer/ask/act → execute → observe → verify → continue, plus
+cancelled/blocked/failed/limit states) with enforced budgets (25 actions,
+30 model calls, 10 minutes, 90-second answer/confirmation timeouts, all
+fail-closed); a deterministic safety gate checking schema → provenance → target
+→ sensitivity → confirmation in fixed order; a browser executor (tab APIs plus
+page operations, re-validating targets at execution instant); a verification
+engine comparing expected vs. observed page state (success/failure/stale/
+unknown — never assuming success); an ask-user loop with a memory-only path for
+secrets (passwords and codes bypass the model entirely and are wiped
+immediately after typing); a deterministic bilingual yes/no matcher with
+negation handling and anti-rider rules; cancellation and human-takes-precedence
+behavior; and a read-aloud flow with continue/stop/repeat.
+
+**Phase 6 — Privacy and security hardening.** A canary-leak suite (fake
+passwords/OTPs/card numbers driven through the real secret-handling flow,
+asserted absent from snapshots, model inputs, logs, telemetry, speech, and
+requests); a 16-case executable security suite covering every item of the PRD 5
+threat model (injection-as-answer, stale targets, sensitive fields,
+confirmation discipline, malformed model output, user override, AI failure,
+cache poisoning, malicious labels, telemetry, restricted pages, upload/download
+policy, navigation policy, confirmation bypass, infinite-loop pumping bounded at
+exactly 4 attempts, restart attacks, confirmation riders); provenance tagging;
+credential-boundary tests; and a published third-party-readable audit note
+(`docs/audit-note.md`).
+
+**Phase 7 — Site qualification and demos.** An executable 9-check qualification
+suite for the baseline test site (injectability, no hidden frames, no
+CAPTCHA/payment in demo paths, stable names, settle timings, memory budget,
+named controls, labeled required fields, working dialog); two scripted demos
+(multi-step search task + ask-user form flow) with word-for-word English and
+Hindi utterances plus rehearsed failure branches; and an SLO report that
+strictly separates measured results from live-pending items (no inflated claims).
+
+**Phase 8 — Release.** Permission review (manifest cut from 6 to 4 permissions
+after auditing all 79 browser-API call sites — `scripting` and `activeTab`
+removed as provably unused; no blanket website access), release gates R1–R5,
+reproducible packaging (byte-identical builds verified by hash), a
+non-technical credential guide, and a bilingual quick-start card.
+
+**The frontend/backend split (ordered after Phase 8, now complete).**
+`frontend/` holds every browser-controlled file and zero provider keys.
+`backend/` (Node service, zero runtime dependencies) holds every provider key
+and all model traffic behind six typed endpoints: chat, enrich, transcribe,
+tts, health, validation. `shared/` holds only contracts both sides import
+(REST shapes, validators, error vocabulary, redaction, freshness policy). The
+two sides meet exclusively at that REST boundary. This fulfils the security
+document's prescribed production architecture (extension → authenticated
+gateway → providers).
+
+---
+
+# 6. Current file layout (abridged)
+
+INVIZ/
+├── frontend/            # Extension: manifest.json, src/ (background, content,
+│                        #   offscreen, ui, verification, ai-clients, tts-shaping),
+│                        # scripts/build.js, dist/ (build output, git-ignored)
+├── backend/             # Service: src/ (server, config, http, routes/, gateway/,
+│                        #   ai/, tts/, whisper/), .env.example (NEVER real keys)
+├── shared/              # api.ts (REST contracts), types, messages (EN+HI),
+│                        # confirmation grammar, redact, logger, constants,
+│                        # validators, freshness policy
+├── test-page/           # Controlled fixture website (the qualified dev target)
+├── docs/                # PRDs 1–6, per-phase PRDs 6.0–6.8, audit note, demo
+│                        #   scripts, SLO report, qualification record, release record
+├── scripts/             # test-page server, secrets scanner (repo-wide)
+└── releases/            # versioned zips (git-ignored, reproducible on demand)
+
+---
+
+# 7. Every defect found and fixed (verification core)
+
+Each item below was caught by a gate (typecheck, test, live probe, or review)
+and fixed in code — never hidden, never worked around in tests.
+
+**Architecture/design (fixed in documents and code):**
+7.1. Browser-automation fallback would have driven a different browser than the
+one holding page memory — removed from the architecture (verified against
+Chrome 136 behavior).
+7.2. Verification had no "expected result" to check against — added a mandatory
+`expect` clause to every action.
+7.3. Page state and task state shared one store with one lifetime — split into
+separate stores (page memory dies on navigation; task memory survives it).
+7.4. "Call the model only when meaning changes" was circular (judging meaning
+needs the model) — replaced with a concrete local trigger list.
+7.5. The safety gate was asked to judge user intent (a reasoning job) — reduced
+to deterministic checks; intent stays with the reasoning model.
+7.6. Credentials were planned to live in the extension with no server anywhere —
+resolved first by decision, then fully by the frontend/backend split.
+7.7. No test strategy or offline/demo fallback existed — added scripted-demo
+procedure with labeled video recordings as the network-dead contingency.
+
+**Correctness bugs (fixed in code, each with a regression test):**
+7.8. Build script deleted the compiled output after compiling (wrong order).
+7.9. Duplicate dead branch in action validation.
+7.10. Wrong relative import from a nested module (failed typecheck).
+7.11. Test fixture too small to exercise the memory cap (scaled up).
+7.12. Dead computation left in the announcement builder.
+7.13. Import workaround hacks (`void X;`) — removed wherever they appeared.
+7.14. Transliteration: nukta-lookup order shadowed combined consonants.
+7.15. Transliteration: missing ॉ/ॄ/danda/ळ/precomposed-nukta code-points leaked
+Devanagari past the guarantee — added mappings plus a catch-all drop rule.
+7.16. Transliteration: missing Hindi final-schwa deletion (राम→raama) — added,
+without touching explicit long vowels (खा stays khaa).
+7.17. Hindi lexicon false positives (`the`, `phone`, `number`, `ticket`,
+`main`, `school` mistagged English as mixed) — audited the whole list,
+removed 6, added 4, with regression tests.
+7.18. Key-pool rotation started at the second key, skipping the first.
+7.19. A lone rate-limited key could never be retried (cooldown blocked
+selection) — added bounded cooling-key reuse.
+7.20. Retry-budget off-by-one denied the final permitted attempt.
+7.21. The 120-candidate trim was silently unlogged — added an explicit counter.
+7.22. Confirmation-YES re-ran the safety gate and re-asked forever — added an
+explicit approved path.
+7.23. Navigation URLs lived in two places (top-level vs parameters) — unified
+on `parameters.url`.
+7.24. A variable was used before its declaration in the execution path.
+7.25. Dropped and restored a loop counter during cleanup.
+7.26. Confirmation matcher flaws: negations self-conflicted (`mat karo`),
+scope-expansion riders slipped through — rewritten with negation absorption
+and a short-affirmation rule.
+7.27. Confirmation tokenizer split Hindi words into consonants (letters-only
+pattern excludes vowel-mark code-points) — fixed to include marks; this would
+have broken ALL Hindi confirmations in production.
+7.28. Test-harness races (finishing playback that hadn't started) — fixed with
+proper waits, not sleep-tuning.
+7.29. Whisper test used browser-only FileReader under Node — switched to the
+universal byte-array API.
+7.30. `javascript:` navigation rejected — then the test (not the code) needed
+updating for the unified URL contract.
+
+**Security findings (fixed, all with executable tests):**
+7.31. Model-written confirmation text was spoken verbatim AND persisted — a
+model-echoed secret would have leaked twice. Fixed templates for sensitive
+targets; stored summaries are the sanitized speech.
+7.32. Action schema accepted unknown extra fields (smuggling surface) — schema
+closed; extras rejected.
+7.33. Redaction over-matched (`authMode`, `discard`, `monkey` wiped) then
+under-matched (`groqKeysConfigured` count wiped; `groqKeys` array missed) —
+rebuilt as segment-aware matching with metadata-suffix exemptions, proven
+twice against live server logs.
+7.34. Page-support check lived untestably inside the worker — extracted to a
+shared tested module.
+
+**Process/tooling incidents (fixed, no product impact):**
+7.35. A PowerShell wildcard mistake emptied one source file; it was fully
+reconstructed and re-verified (all tests green). Noted here for completeness.
+7.36. Test runner picked up compiled output files — pinned per-workspace test
+configs with explicit includes.
+7.37. New TypeScript version removed two compiler options — configs updated.
+7.38. Packaging command misused a flag that rejects wildcards — corrected.
+
+---
+
+# 8. Current verified state
+
+- Type checks: clean in both workspaces.
+- Tests: **160 frontend + 83 backend, all green** (shared contract tests run in
+  both). No test uses simulated AI; fakes exist only at seams (fetch, audio,
+  storage, clock).
+- Builds: both workspaces compile; extension artifact reproducibly packaged
+  (`releases/inviz-0.0.2.zip`).
+- Secrets scan: clean. An executable architecture test additionally proves zero
+  provider keys, endpoints, or credential names anywhere in frontend code.
+- Live proofs completed: Groq/Whisper contract shapes, Gemini English synthesis
+  (real audio bytes), Gemini Hindi block + romanized-Hindi success, backend
+  server boot/health/auth/404 behavior, validation endpoint with sanitized
+  error details.
+- Live proofs pending (need owner input — see Section 9): microphone-to-text
+  with real speech, agent reasoning with a real Groq key, audible Hindi through
+  the extension, recorded demo videos.
+
+---
+
+# 9. Still pending — what is needed from the owner
+
+9.1. **Groq API key (C1)** — paste into `backend/.env` as `GROQ_API_KEYS`.
+Unblocks: live transcription proof, live agent-reasoning proof, demo rehearsals.
+9.2. **Demo videos** — recorded after the first 5/5 live passes (needs 9.1).
+9.3. **Two real-site picks (optional, deferred)** — each gets qualified by the
+6-item procedure before any demo use; test-page remains the qualified target.
+9.4. **License choice** — currently deferred (`UNLICENSED` guards against
+accidental publishing).
+9.5. Nothing else is blocked. There are no hidden shortcuts, no simulated
+components, and no open design questions remaining in Phases 0–8.
+
+---
+
+# 10. Glossary for the verifier
+
+- **INVIZ** — the product (was "ContextLens + VoiceLens" in early docs).
+- **ContextLens** — understands the web page (DOM/ARIA extraction, element
+  registry, page memory). Frontend.
+- **VoiceLens** — understands the human (microphone, transcription, talk-back).
+  Split across frontend (capture/playback) and backend (transcription/synthesis).
+- **Qwen** — the reasoning model (Groq-hosted), reached only through the backend.
+- **WebGuard** — deterministic safety gate between reasoning and execution.
+- **Page-State Cache / TaskState** — short-term page memory vs. task progress,
+  separate stores with separate lifetimes.
+- **C1/C2** — credential bundles: Groq keys (reasoning + transcription) and the
+  Gemini API key (speech). Both live exclusively in `backend/.env`.
+- **PRD** — Product Requirements Document. PRDs 1–5 define product/architecture;
+  PRD 6 (+6.0–6.8) defines the phased build; this PRD 7 records what happened.
+
+*End of PRD 7 v1.0 — handover record. Verify everything; trust nothing unverified.*

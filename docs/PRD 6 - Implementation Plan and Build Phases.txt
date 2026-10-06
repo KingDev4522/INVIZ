@@ -1,0 +1,267 @@
+# PRD 6 — Implementation Plan & Build Phases
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6 — Implementation Plan & Build Phases
+**Purpose:** Define exactly what gets built, in what order, to what acceptance standard, with which credentials, and under which bilingual requirements — so all prior PRDs become buildable work.
+**Relationship:** PRD 1 defines requirements. PRD 2 defines behavior. PRD 3 defines architecture. PRD 4 defines technical contracts. PRD 5 defines security. **This document defines the build.**
+
+> **Scope boundary:** This document does not redefine product behavior, architecture, or security policy. Where a prior PRD left an implementation decision open, this document closes it with a pinned default. Any deviation from a pinned default during implementation requires updating this document first.
+
+---
+
+# 0. LOCKED PROGRAM DECISIONS
+
+These owner decisions are final and used throughout:
+
+| # | Decision | Value |
+|---|---|---|
+| D1 | Schedule model | No time limit. Full build, phased with exit gates. No scope is cut for speed; phases sequence the work instead. |
+| D2 | Credentials | Owner provisions all keys. End-user provisioning stays late-bound (options page, §1), but developers need live keys progressively: **C2 is required to enter Phase 2** (TTS client cannot be built or tested without it) and **C1/C3 are required to enter Phase 3** (Whisper integration cannot be built or tested without them). No simulated or fixture-driven AI responses exist anywhere (PRD 4 §67) — a phase that needs a model needs the key. No credential may be hard-coded, and the software must boot into a clear "credentials missing" state, not a crash. |
+| D3 | Demo sites | Decided later. The build must therefore include §9 Site Qualification Checklist plus a built-in controllable test page, so any later site choice can be qualified in under an hour. |
+| D4 | Languages | English + Hindi, end to end (input, reasoning, output). See §3 Bilingual Requirements. |
+| D5 | Product naming: **INVIZ** (owner-decided, final) | Product, manifest, UI, README, and artifacts use INVIZ. ContextLens + VoiceLens remain as internal component names (page understanding + voice interaction). |
+| D6 | License: **deferred to owner decision** | No license file ships until the owner chooses. `package.json` declares `UNLICENSED` to prevent accidental publishing. |
+
+Technical facts verified against current vendor documentation and pinned here:
+
+- `chrome.commands`: shortcuts must include Ctrl or Alt; Ctrl+Alt forbidden; max 4 suggested keys; global scope limited to Ctrl+Shift+[0–9]; Tab not bindable; `commands.onCommand` wakes a suspended service worker.
+- Offscreen documents: exactly one at a time; `USER_MEDIA` reason enables microphone capture; `AUDIO_PLAYBACK` document is closed after 30s without audio; mic permission grant requires a user gesture on first run.
+- `chrome.storage.session`: 10 MB quota (10,485,760 bytes), in-memory only, cleared on browser close/disable/reload/update, not exposed to content scripts by default. `local`/`sync` areas are not encrypted — sensitive values must never rest there.
+- Gemini TTS via the Google Gemini API (AI Studio — NOT Cloud TTS, NOT Vertex):
+  model `gemini-3.1-flash-tts-preview` on
+  `POST .../v1beta/models/gemini-3.1-flash-tts-preview:generateContent` with
+  `x-goog-api-key` header and body `{ contents: [{ parts: [{ text }] }],
+  generationConfig: { responseModalities: ["AUDIO"],
+  speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } } }`.
+  Response audio is base64 PCM16 (typically 24kHz mono) wrapped to WAV client-side.
+  Style control is inline text instruction. Auth is a plain API key — no OAuth,
+  no project ID. Verified live (EN synthesis returns real PCM audio).
+- Groq: OpenAI-compatible base `https://api.groq.com/openai/v1`; models `qwen/qwen3.8-27b` (chat) and `whisper-large-v3-turbo` (STT, fallback `whisper-large-v3`); `reasoning_effort` supported on Qwen3; JSON mode supported; developer rate limits are per-model (verify current figures at provisioning — the key pool in §1-C5 must be designed with backoff regardless).
+
+---
+
+# 1. CREDENTIALS MANIFEST
+
+The owner provisions these. End users enter them through the options page only; the software stores them in `chrome.storage.local` (user-owned device persistence), never logs them, never transmits them except to their own provider endpoints, and exposes a one-click validation test per credential. Developers provision the same keys earlier per the phase gates: C2 before Phase 2, C1/C3 before Phase 3. Until its gate credential exists, a phase cannot start — there is no simulated stand-in (PRD 4 §67).
+
+| ID | Credential | Scope / configuration required | Validation test (built in Phase 0) |
+|---|---|---|---|
+| C1 | `GROQ_API_KEY` (1..N supported) | Access to `qwen/qwen3.8-27b` and `whisper-large-v3-turbo` on GroqCloud | `GET /models` lists both IDs → 1 chat completion (`reasoning_effort:none`, JSON mode) → 1 transcription of a 3s fixture clip |
+| C2 | Gemini API key (Google AI Studio) | Key with access to `gemini-3.1-flash-tts-preview` (standard AI Studio key; no OAuth, no project, no special role) | Synthesize "VoiceLens audio check." (EN) and a Hindi check (HI) via generateContent; both return real PCM audio |
+| C3 | Fallback model access (recommended) | Same Groq project: `qwen/qwen3-32b` enabled | Same chat smoke test against the fallback ID; used only if C1's primary model fails |
+| C4 | (No other secrets) | — | The repo must contain zero secrets. Release gate R2 (PRD 6.8) enforces this with an automated scan. |
+
+Missing-credential behavior (mandatory): on boot with C1 or C2 absent, the extension announces via available channel ("AI services are not configured. Open extension options to add keys.") and runs in **deterministic accessibility mode** (fast path + `speechSynthesis`), never a crash loop, never a silent dead UI.
+
+---
+
+# 2. GLOBAL ENGINEERING STANDARDS (APPLY TO ALL PHASES)
+
+1. **TypeScript strict**, no `any` at module boundaries. Every cross-context contract has a type in `src/shared/types` **plus** a runtime validator (schema validation is a PRD 5 invariant — compile-time types alone do not satisfy it).
+2. **Message envelope** for all inter-context traffic (PRD 4 §72–74): `{ type, requestId, taskId?, tabId?, payload, timestamp? }`. Unknown types and malformed payloads are rejected and logged as `SCHEMA_VALIDATION_FAILED`.
+3. **Error vocabulary** is exactly PRD 4 §62. User-facing speech strings per code are defined once in `src/shared/messages.ts` in English and Hindi — no ad-hoc error sentences anywhere else.
+4. **Redaction by default.** Logs carry metadata only (`taskId, pageGeneration, actionType, targetId, verificationStatus, errorCode`). A shared `redact()` wraps every log/write path; Category C values (PRD 5 §23) can never reach logs, storage, cache, telemetry, or TTS.
+5. **Live services only — no simulated AI.** There is no mock-AI mode and no fixture-driven model stand-in in any runtime path (PRD 4 §67). Every phase exit is proven against the real Groq and Google Cloud endpoints. Static test data is permitted only where no model is involved: fixture DOM pages, fixture audio clips (always transcribed live), schema-validation corpora of *recorded real* responses kept in `regression-corpus/` and unreachable from runtime imports, and prompt-injection payload fixtures for WebGuard policy tests.
+6. **Bilingual from Phase 0.** No English-only intermediate that "gets Hindi later." Fixtures, prompts, grammars, and voice routing are EN+HI from the start (§3).
+7. **Definition of done per work item:** implemented + runtime-validated + live-service test passing + bilingual strings present + no new `TODO` without a tracking entry in this document's §12.
+
+---
+
+# 3. BILINGUAL REQUIREMENTS (ENGLISH + HINDI)
+
+## 3.1 Input language handling
+
+- Whisper calls leave `language` unset (auto-detect) by default; a per-user override (`en` | `hi` | `auto`) lives in configuration. Auto-detect is required because code-mixed (Hinglish) utterances are expected.
+- Every transcript is tagged `{ text, lang: "en" | "hi" | "mixed", source: "voice" }`. Tagging rule: Devanagari script present → `hi`; else Latin-script with Hindi lexicon hits → `mixed`; else `en`. The tag routes TTS voice selection (§3.2) and is passed to Qwen as context — it never changes the words.
+
+## 3.2 Output voice routing (Gemini-TTS)
+
+Single model for all languages: `gemini-3.1-flash-tts-preview` via the Gemini API.
+Language is auto-detected from the text (no languageCode parameter on this API);
+the prebuilt voice `Kore` is used for every language (one consistent assistant
+identity; per-language override is configuration, not code).
+
+| Utterance lang tag | Synthesis |
+|---|---|
+| `en` | Text as-is with EN style prefix ("Say clearly and neutrally: …"), voice `Kore` |
+| `hi` | Text as-is (Devanagari preferred, produced by Whisper auto-detect) with HI style prefix, voice `Kore` |
+| `mixed` | Split into per-language segments (Devanagari runs → HI prefix, rest → utterance default), each synthesized separately and played in order |
+
+Focus-announcement language follows the page (`<html lang>`, default `en`) unless the user sets an override. Agent speech follows the user's last utterance tag (language mirroring). Qwen's system prompt instructs: **respond in the user's language; never translate proper nouns, addresses, or code.**
+
+## 3.3 Confirmation grammar (deterministic — see §7)
+
+YES set: `yes, yeah, yep, yup, sure, ok, okay, correct, confirm` + `haan, haanji, hanji, ji, theek hai, sahi hai, karo, kar do` (+ Devanagari forms हाँ, हांजी, जी, ठीक है, सही है, करो).
+NO set: `no, nope, nah, don't, stop, cancel, wrong` + `nahin, nahi, na, mat karo, ruko, galat` (+ Devanagari forms नहीं, ना, मत करो, रुको, ग़लत).
+Matching is case-insensitive substring on normalized text (Devanagari + roman both indexed). Anything else → clarification re-ask, never a guess, never silence-as-approval.
+
+---
+
+# 4. PINNED TECHNICAL CONSTANTS
+
+These close the open quantitative questions from the review. Changing any value is a design change, not a tweak.
+
+## 4.1 Keyboard commands (manifest `commands`, all remappable at `chrome://extensions/shortcuts`)
+
+| Command | Default (Win/Linux) | macOS | Purpose |
+|---|---|---|---|
+| `toggle-voicelens` | Ctrl+Shift+Y | Command+Shift+Y | Activate/deactivate VoiceLens (primary activation; popup is secondary) |
+| `start-voice-capture` | Ctrl+Shift+V | Command+Shift+V | Begin one voice turn (toggle; auto-stops on silence) |
+| `stop-cancel-task` | Ctrl+Shift+X | Command+Shift+X | Cancel active task; also stops speech |
+| `repeat-last` | Alt+Shift+R | Alt+Shift+R | Repeat last announcement (Alt-based to avoid the Ctrl+Shift+R hard-reload conflict) |
+
+Rationale: 4 commands = the platform maximum for suggested keys; all satisfy the must-include-Ctrl-or-Alt rule; none collide with Chrome defaults. `commands.onCommand` wakes the service worker, so activation works even when the worker was suspended.
+
+## 4.2 Voice capture limits (offscreen document)
+
+- Max 60s per utterance (single upload; ~250KB Opus — no chunking protocol needed).
+- Auto-stop on 1.5s of sub-threshold audio energy (WebAudio analyser in the offscreen doc).
+- Capture-state earcons synthesized locally (WebAudio oscillator, zero network): 660Hz/80ms = listening, 440Hz/120ms = captured, 220Hz/200ms = error. No blind user is left guessing whether the mic is live.
+- First-run mic grant flow: options-page button ("Enable microphone") providing the required user gesture, with `navigator.permissions.query({name:"microphone"})` status surfaced in the popup.
+
+## 4.3 Audio Controller policy
+
+Priority (highest first): safety/confirmation → agent question → critical error → task status/result → focus announcement. Higher priority interrupts lower. Identical consecutive focus announcements deduplicated. TTS text chunked at ≤3,900 bytes on sentence boundaries (safe under the model input budget, style prefix included); per-(text, voice, model, lang) in-memory audio cache (50MB LRU); `speechSynthesis` fallback preserves the same interface. Primary failure latches to local speech after 3 consecutive failures; 401/403 surfaces invalid-key behavior (re-paste the AI Studio key).
+
+## 4.4 Task and loop budgets (Agent Controller enforced)
+
+| Budget | Value | On exceed |
+|---|---|---|
+| Max actions per task | 25 | `TASK_LIMIT_REACHED`, speak, stop |
+| Max recovery attempts per action | 3 | mark FAILED, ask user or stop |
+| Max Qwen calls per task | 30 | `TASK_LIMIT_REACHED`, speak, stop |
+| Max task wall-clock | 600s | `TASK_LIMIT_REACHED`, speak, stop |
+| `WAITING_FOR_USER_ANSWER` TTL | 90s | fail closed: cancel question, preserve task, speak |
+| `WAITING_FOR_CONFIRMATION` TTL | 90s | fail closed: action rejected, speak (never execute) |
+
+## 4.5 Qwen call policy
+
+- Interactive calls: `reasoning_effort: "none"`, JSON mode (`response_format: json_object`), bounded `max_completion_tokens` (2k default; enrichment up to 8k).
+- Page-enrichment calls (async only): `low`/`medium`; `high` only behind a config flag.
+- Input budget: 10,000 tokens max per call. Layer-A serializer priority: focused element → form under task → headings/landmarks → visible interactive candidates (cap 120, forms first) → visible text (truncated). Anything over budget is cut from the tail, and the cut is logged (metadata only).
+- Fallback chain: `qwen/qwen3.8-27b` → `qwen/qwen3-32b` → `AI_SERVICE_UNAVAILABLE` (deterministic mode). Fallback switch is announced in logs, never to page context.
+
+## 4.6 Storage map
+
+| Data | Area | Why |
+|---|---|---|
+| TaskState (goal, progress, pending Q, confirmations, recovery counters) | `chrome.storage.session` (10MB, in-memory, survives SW restart, dies on browser close) | Survives the 30s SW suspension; cannot leak across browser sessions |
+| Page-State Cache Layer A/B (per tab) | `chrome.storage.session`, namespaced `page:{tabId}`, LRU-evicted, per-tab cap 1MB | Bounded working memory; rebuilt from DOM on miss |
+| Category C values (passwords, OTP, CVV, card, tokens) | Runtime memory only — **never written to any storage area, log, cache, or transcript store** | Chrome documents local/sync as unencrypted; session is RAM-only but still shared — memory-only is the strict rule |
+| User config + credentials (C1–C3) | `chrome.storage.local` (device persistence, user-owned) | Survives restart; entered by the user, never committed |
+| Telemetry (if enabled) | Opt-in only; metadata events per PRD 5 §42 | Never URLs, content, values, or recordings |
+
+Restart rule (fail closed): on extension startup/reload, any TaskState found in `session` from a previous run is marked `CANCELLED (restart)` and announced; pending confirmations are never resumed.
+
+---
+
+# 5. PER-ACTION PARAMETER SCHEMAS (CLOSES G1)
+
+WebGuard validates type + target + generation + **these per-action parameter rules**. Unknown fields are rejected under strict validation.
+
+| Action | Parameters (all required unless marked ?) | Allowed `expect` types | Notes |
+|---|---|---|---|
+| `click` | `target`, `pageGeneration` | `element_present`, `dialog_present`, `url_changed`, `navigation_completed`, `text_present` | Double-submit guard: a second `click` on same target+generation within 2s without new observation is rejected |
+| `type` | `target`, `value` (≤2,000 chars), `submit?` (Enter after typing, default false), `pageGeneration` | `field_value_present` | If target field-type is Category C, value must arrive via the memory-only path (§6.4); `submit:true` on a sensitive form forces confirmation |
+| `focus` | `target`, `pageGeneration` | `focused_element` | Read-only w.r.t. page state; still WebGuard-checked |
+| `select` | `target`, `option: {by: "label"\|"value"\|"index", ref: string\|number}`, `pageGeneration` | `field_value_present`, `element_state(selected)` | Option resolved against live `<option>` list at execution; unresolved → `ELEMENT_NOT_FOUND`, no guessing |
+| `scroll` | `target?` (element or viewport), `direction: up\|down\|left\|right`, `amount_px?` (default 600, max 5000) | `element_present` (target scrolled into view) | Viewport scroll without target is non-verified but logged; never used for state-changing flows |
+| `press_key` | `key` (allowlist only), `modifiers?` (subset of allowlist) | `element_present`, `focused_element`, `dialog_present` | **Allowlist:** Enter, Tab, Escape, Space, Backspace, Delete, Arrows, Home, End, PageUp, PageDown. **Modifiers: none by default.** Ctrl/Alt/Meta combinations are denied unless individually listed in policy (prevents Ctrl+T/Ctrl+W-class bypasses around tab policy) |
+| `navigate` | `url` | `url_changed`, `navigation_completed` | Scheme must be `http`/`https`. **Denied:** `javascript:`, `data:`, `file:`, `view-source:`, `chrome://`, `chrome-extension://`, `about:`. Host allowlist optional per config; suspicious-destination rule per PRD 5 §54 enforced here |
+| `go_back` / `go_forward` | (none) | `url_changed` | Triggers bfcache revalidation path (PRD 4 §87) before any continuation |
+| `open_tab` | `url` (same policy as `navigate`) | `navigation_completed` | New tab becomes agent tab only after its PageState generation exists |
+| `close_tab` | `tabId?` (default: agent tab) | (none — verified by tab-removal event) | May never close the last browser window; closing a tab with an active task in another tab requires no confirmation but is logged |
+| `read` | `target` (region element or `"selection"`), `max_chars?` (default 4,000, max 20,000 → chunked TTS) | — (exempt) | **Read-only: exempt from `expect`.** Text goes DOM → TTS directly (no Qwen round-trip unless the user asked a question *about* the text). TTS-bound text follows minimization (§3 + PRD 5 §33): requested region only |
+
+**Upload/download policy (closes the §98 vs §53 inconsistency):** there are **no** `upload`/`download` action types. File acquisition uses the manual-handoff pattern (same principle as PRD 5 §61 CAPTCHA rule): the agent navigates to and focuses the control, speaks exactly what is needed ("Choose the PDF resume file, then say continue"), detects the change, and resumes. The agent must never fabricate `File` objects or drive picker dialogs programmatically.
+
+**Expectation type added:** `element_state { target, state: checked | expanded | selected | pressed, value: boolean }` — covers checkbox/radio/accordion verification missing from PRD 4 §99.
+
+---
+
+# 6. SENSITIVE-VALUE PATH (MEMORY-ONLY)
+
+For Category C fields (PRD 5 §23: passwords, OTP, CVV, card numbers, auth secrets, tokens):
+
+1. ContextLens classifies the field *before* any question is asked (PRD 4 §29 categories enforced at runtime).
+2. The agent's spoken question never names the value class beyond what is necessary ("What is the one-time code?" — never "Tell me your password 123…").
+3. Transcript → field-value binding happens in the Agent Controller without Qwen (deterministic slot-fill for `WAITING_FOR_USER_ANSWER` on a sensitive field).
+4. The `type` action carries the value in a runtime-only envelope; WebGuard validates type/target/generation/confirmation **without logging or persisting the value**; the Executor writes it to the DOM; the envelope is zeroed immediately after verification.
+5. The value never enters: Qwen context, Layer A/B, TaskState snapshots, logs, telemetry, TTS, or any storage area. Verification for sensitive fills checks `field_value_present` by *length/non-emptiness*, never by echoing content.
+
+---
+
+# 7. CONFIRMATION PROTOCOL (DETERMINISTIC — CLOSES G2)
+
+1. WebGuard emits `REQUIRE_CONFIRMATION` with a structured consequence summary `{ action, target_label, data_classes_involved, irreversible: bool }`.
+2. Audio Controller speaks the consequence from a fixed template (EN/HI), e.g. "This will submit the application form with your name, email and phone number. Should I continue?" — never a bare "Confirm?".
+3. The next user utterance is matched **deterministically** against §3.3 YES/NO sets. Match → execute/reject. No match → one clarification re-ask ("Please say yes to continue, or no to stop."). Second non-match → action rejected, task paused, user informed.
+4. The model is never in this path. Qwen does not paraphrase confirmations, does not decide what "yes" means, and cannot be jailbroken into treating page text as approval (PRD 5 §14: only explicit user interaction authorizes).
+5. 90s TTL, fail closed (§4.4). Every decision logged as metadata (`SENSITIVE_ACTION_CONFIRMATION` with outcome, never content).
+
+---
+
+# 8. HUMAN-WINS ARBITRATION (RUNTIME RULE)
+
+Content script installs capture-phase listeners for trusted user input (`isTrusted` keydown/click/wheel/input/navigation-intent) while TaskState is in any active agent state. On detection: Agent Controller transitions to `PAUSED_USER_OVERRIDE`, halts further execution (in-flight DOM op completes or aborts safely — never mid-keystroke injection), re-observes PageState generation, and speaks ("Paused. You took over. Say resume to continue, or give a new instruction."). `resume` re-runs Qwen from the *new* state; stale pending actions are discarded, never replayed. This is the executable form of PRD 1 §16 / PRD 3 Invariant 6.
+
+---
+
+# 9. SITE QUALIFICATION CHECKLIST (FOR THE LATER SITE DECISION — D3)
+
+Any candidate demo/production site must pass all of these; qualification is a <1h exercise per site using the Phase 0 test harness:
+
+1. Task path pages are `http(s)` and injectable (no `chrome://`, Web Store, PDF-viewer, or extension-gallery surfaces in the flow).
+2. No required target control lives inside a cross-origin iframe or closed shadow root on the task path (same-origin frames OK; verified via the element registry, not by inspection).
+3. No CAPTCHA, OTP-gated login, or payment step inside the scripted demo path (manual-handoff pattern covers these in production, not in demos).
+4. Target controls expose stable accessible names across reloads (registry diff on 3 reloads must be ID-stable in labeling, generation-scoped as designed).
+5. Dynamic regions settle: `aria-busy` cycles complete within the verification `timeout_ms` budget (default 3s, max 10s).
+6. Page weight sanity: serialized Layer A for the task pages fits the 1MB per-tab cap with headroom (else the site needs a scoped-content rule before demoing).
+
+The repo ships `test-page/` — a local fixture site implementing a search flow, a form (ordinary + sensitive fields), a modal, and a results list — so every phase exit demo runs deterministically regardless of the external site decision.
+
+---
+
+# 10. ACCEPTANCE SLOS (MEASURED ON BROADBAND, DESKTOP CHROME)
+
+| Interaction | SLO (p95) |
+|---|---|
+| Focus move → first audio output starts | ≤ 800ms |
+| Capture stop → transcript available (≤15s audio) | ≤ 2.5s |
+| Voice command → spoken acknowledgement or question | ≤ 4s |
+| Structured action → verification verdict (local DOM change) | ≤ 5s (excl. site latency) |
+| Scripted demo flows (live services) | 5/5 passes, twice each |
+| Recorded backup video of each passing demo | Archived, explicitly labeled as recording (network-dead contingency) |
+| PRD 5 §83–94 security cases | 12/12 pass, including malicious-ARIA and Layer-B poisoning cases |
+| Bilingual checks | EN + HI confirmation sets, HI TTS voice, Devanagari + roman matching, language mirroring — all pass |
+
+---
+
+# 11. BUILD PHASES (PER-PHASE IMPLEMENTATION PRDS)
+
+The build is specified phase by phase in nine dedicated implementation documents. This master document holds the shared contract (§§0–10, §12: decisions, credentials, standards, bilingual rules, constants, action schemas, sensitive-value path, confirmation protocol, arbitration, site checklist, SLOs). Each phase document holds that phase's objective, entry criteria, work items with PRD traceability, and exit criteria. Phase documents are normative for their own phase: where a phase document and this master disagree, the phase document governs and this master must be amended.
+
+| Phase | Document | Objective |
+|---|---|---|
+| 0 | PRD 6.0 — Phase 0: Foundations & Repo | Scaffold, shared contracts, credential tooling, fixture site, redaction, repo hygiene |
+| 1 | PRD 6.1 — Phase 1: ContextLens & Fast Path | DOM/ARIA extraction, element registry, focus announcements, change detection, page boundaries |
+| 2 | PRD 6.2 — Phase 2: Audio Runtime | Offscreen document, Audio Controller, Google TTS client, half-duplex gating, earcons (requires C2) |
+| 3 | PRD 6.3 — Phase 3: Voice Input | Capture pipeline, live Whisper via Groq, transcript normalization, turn states (requires C1) |
+| 4 | PRD 6.4 — Phase 4: AI Gateway & Qwen Reasoning | Gateway + key pool, Qwen client, context budgeting, enrichment pipeline, Q&A + element-find flows |
+| 5 | PRD 6.5 — Phase 5: Agent Runtime | Agent Controller, WebGuard engine, Browser Executor, Verification, ask-user + confirmation, read/paging |
+| 6 | PRD 6.6 — Phase 6: Privacy & Security Hardening | Category enforcement audit, provenance tagging, credential boundaries, full security suite |
+| 7 | PRD 6.7 — Phase 7: Site Qualification & Demo | Site qualification record, demo scripts, SLO measurement, recorded backup videos |
+| 8 | PRD 6.8 — Phase 8: Release | Permission review, release gates R1–R5, packaging, credential guide, quick-start card |
+
+Build-order rule: phases execute strictly in order 0→8. No phase starts until the previous phase's exit criteria are green against live services, in English and Hindi. Credential gates: C2 is required to enter Phase 2; C1/C3 are required to enter Phase 3. There are no simulated-AI shortcuts at any gate (PRD 4 §67).
+
+---
+
+# 12. CHANGE LOG (THIS DOCUMENT)
+
+| Version | Date | Change |
+|---|---|---|
+| 1.0 | 2026-10-05 | Initial implementation plan: locked decisions D1–D6, credentials manifest, bilingual EN+HI requirements, pinned constants, per-action schemas, confirmation protocol, human-wins rule, site checklist, SLOs, Phases 0–8. |
+| 1.1 | 2026-10-05 | No-simulation policy: mock-AI harness removed everywhere (PRD 4 §67 rewritten, fallback matrix corrected); credential gates pinned (C2→Phase 2, C1/C3→Phase 3); phase detail moved to per-phase documents PRD 6.0–6.8; this document is now the shared build contract. |
+
+*End of PRD 6 v1.1 (master build contract). Per-phase implementation documents PRD 6.0–6.8 are normative for their phases. Build in phase order; no phase starts until the previous phase's exit criteria are green against live services.*

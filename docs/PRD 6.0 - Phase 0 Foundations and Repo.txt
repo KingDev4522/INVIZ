@@ -1,0 +1,75 @@
+# PRD 6.0 — Phase 0: Foundations & Repo
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.0 — Phase 0 Implementation (Foundations & Repo)
+**Parent:** PRD 6 (master build contract, §§0–10, §12). This document is normative for Phase 0.
+**Objective:** A loadable, typed, redacted-by-default extension skeleton with credential tooling, a fixture site, and repo hygiene — zero AI calls, zero placeholders that pretend to be AI.
+
+> No simulated AI exists in this project (PRD 4 §67). Phase 0 builds no model-facing code paths at all, so no credential is required to enter or exit this phase.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- Empty repository with Node/TypeScript toolchain installed (`tsc --strict`, bundler for content-script + SW targets).
+- PRD 6 master §§0–5 read and accepted as pinned (budgets, schemas, storage map).
+
+## 1. WORK ITEMS
+
+### 1.1 Repository scaffold (PRD 4 §96)
+
+Create exactly this tree; no extra top-level directories without amending this document:
+
+```text
+src/
+├── background/      # service-worker.ts, agent-controller/* (stub: lifecycle skeleton only),
+│                    # task-state/*, webguard/* (stub), ai-gateway/* (stub), browser-executor/* (stub)
+├── content/         # contextlens/*, dom-extractor, aria-extractor, focus-monitor,
+│                    # element-registry, page-observer, highlighter (stubs in Phase 0)
+├── offscreen/       # offscreen.html/ts: audio-capture, audio-player, voice-controller (stubs)
+├── ai/              # qwen-client, whisper-client, schemas, response-validator (stubs)
+├── tts/             # google-tts, speech-synthesis-fallback (stubs)
+├── verification/    # verification-engine (stub)
+├── shared/          # types, messages, errors, constants, redact (REAL — see 1.2)
+├── ui/              # popup, options (REAL skeleton — see 1.3)
+test-page/           # fixture site (REAL — see 1.4)
+docs/                # site-qualification.md (empty template), audit-note.md (empty template)
+```
+
+Stubs compile, export their future interfaces, and throw `NOT_IMPLEMENTED (Phase N)` — they never return fabricated data. A stub that returns a fake transcript, action, or verdict is a release-blocking defect per PRD 4 §67.
+
+Build outputs: `dist/` git-ignored; `README.md` documents `npm run build` + `chrome://extensions` → Load Unpacked.
+
+### 1.2 Shared contracts — REAL implementation (PRD 4 §62, §72–74, §97–103)
+
+- `src/shared/types.ts`: `PageState, PageGeneration, ElementReference, TaskState, StructuredAction, Expectation, ExecutionResult, VerificationResult, AgentOutcome, AIError, SecurityDecision, AudioRequest, ExtensionMessage` — exactly the PRD 6 §5 action schemas and PRD 4 §99 expectation types, with runtime validators beside every type (validator failure → `SCHEMA_VALIDATION_FAILED`, never an exception leak to the UI).
+- `src/shared/messages.ts`: envelope `{ type, requestId, taskId?, tabId?, payload, timestamp? }`, the full message-type registry (PRD 4 §73), and the error-code→speech-string table in **English and Hindi** (PRD 4 §62 codes; strings follow PRD 6 §3 language rules).
+- `src/shared/constants.ts`: every pinned number from PRD 6 §4 (budgets, TTLs, caps, chunk sizes, shortcut defaults). Magic numbers elsewhere are defects.
+- `src/shared/redact.ts`: wraps all log/write paths; Category C patterns (password-like, OTP-length digit runs in sensitive fields, card patterns, tokens) replaced before emission. Unit-tested with canary values.
+
+### 1.3 Manifest + options + credential tooling — REAL (PRD 4 §71, §75; PRD 6 §1)
+
+- `manifest.json` (MV3): permissions exactly `storage, scripting, tabs, activeTab, commands, offscreen`; the 4 commands from PRD 6 §4.1 with suggested keys; content-script matcher set to `test-page` origin + `<all_urls>` **disabled** until Phase 7 scoping (PRD 6.8 R-gate records the final list).
+- Options page: credential fields C1 (1..N Groq keys), C2 (Google TTS key), C3 (fallback model flag) + per-credential **live validation test buttons** executing PRD 6 §1 smoke tests against real endpoints. Keys persist to `chrome.storage.local` only.
+- Boot state with missing credentials: popup + spoken (`speechSynthesis`) message "AI services are not configured. Open extension options to add keys." Extension otherwise idle — no crash loop, no silent dead UI.
+
+### 1.4 Fixture site `test-page/` — REAL (PRD 6 §9)
+
+Local static site implementing: search flow (input + results list), form (name/email/phone/address + password + OTP fields), modal dialog, results container with `aria-busy` transitions, heading/landmark structure, and `?inject=<payload>` query rendering hostile fixtures (page-text instruction, malicious `aria-label`, hidden-text instruction) for later WebGuard tests. Serves via `npm run test-page`. Nothing on this page simulates the extension — it is the *target*, not the agent.
+
+### 1.5 Logging, telemetry skeleton, repo hygiene
+
+- Logger with levels + `redact()` enforced at the single emission point; telemetry module present but **disabled by default** (opt-in only, PRD 5 §41–42).
+- Secrets scan in CI (or `npm run scan-secrets` pre-commit if no CI): fails on `gsk_`, `AIza`, private-key blocks, `password\s*=` literals in non-test code.
+- `docs/` templates created; PRD version headers (version/date/status) added to PRDs 1–6 master.
+
+## 2. EXIT CRITERIA (ALL REQUIRED)
+
+1. Extension loads unpacked with zero console errors; popup opens; options page renders EN+HI strings.
+2. Each credential validation button executes a **real** endpoint smoke test and reports pass/fail truthfully (tested with one valid and one invalid key).
+3. `test-page` serves locally; all four regions (search, form, modal, results) present; `?inject=` variants render.
+4. Unit suite green: validators (valid + malformed inputs), redact() canary suite, constants snapshot, message-envelope rejection of unknown types.
+5. `npm run scan-secrets` passes; repo contains zero credentials.
+6. Bilingual check: all Phase 0 user-facing strings exist in EN+HI; missing-string lint passes.
+
+*End of PRD 6.0 v1.0.*
