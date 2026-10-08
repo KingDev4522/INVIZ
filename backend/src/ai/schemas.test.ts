@@ -98,6 +98,46 @@ describe("SYSTEM_PROMPT_V2 preserves the closed action-object key allowlist", ()
   });
 });
 
+describe("SYSTEM_PROMPT_V2 documents the action parameters the validator enforces", () => {
+  // shared/types.ts validateStructuredAction is CLOSED: navigate/open_tab demand
+  // parameters.url, type demands a top-level value, select demands
+  // parameters.option{by,ref}, press_key demands parameters.key. A prompt that
+  // lists the action names but not their parameter shape teaches the model a
+  // shape the validator rejects, so the turn dies on the corrective re-ask.
+  it("tells the model the navigate/open_tab destination lives in parameters.url", () => {
+    expect(flat()).toContain("parameters.url");
+    expect(flat()).toContain("NEVER a target and NEVER a top-level key");
+  });
+
+  it("states the required parameter shape of each parameterised action", () => {
+    for (const needle of [
+      'top-level "value" string',
+      '"option":{"by":"label|value|index"',
+      '"key":"Enter|Tab|Escape',
+      'max_chars',
+    ]) {
+      expect(flat()).toContain(needle);
+    }
+  });
+});
+
+describe("SYSTEM_PROMPT_V2 names the payload sections the controller emits", () => {
+  // buildUserPayload (shared/api.ts) labels the user message. Same drift risk as
+  // the outcome shapes: rename a section and the model loses the only hint about
+  // where focus or the prior verified result lives.
+  it("names every labeled section buildUserPayload produces", () => {
+    for (const section of [
+      "[USER INTENT, lang=",
+      "[VERIFIED PAGE STATE]",
+      "[AVAILABLE SKILLS]",
+      "[CURRENT FOCUS]",
+      "[LAST VERIFIED RESULT]",
+    ]) {
+      expect(SYSTEM_PROMPT_V2).toContain(section);
+    }
+  });
+});
+
 describe("SYSTEM_PROMPT_V2 preserves the bilingual language rule (D4)", () => {
   it("tells the model to respond in the user's language and how to read the tag", () => {
     expect(SYSTEM_PROMPT_V2).toContain("YOUR LANGUAGE");

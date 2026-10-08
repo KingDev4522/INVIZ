@@ -6,6 +6,7 @@
  * Run: npm test
  */
 import { describe, expect, it, vi } from "vitest";
+import { OLLAMA_NUM_CTX } from "../../../shared/constants.js";
 import { GatewayError } from "./gateway.js";
 import { postChatOllama, probeOllama } from "./ollama.js";
 
@@ -54,6 +55,7 @@ describe("postChatOllama — local provider", () => {
     expect(body["think"]).toBe(false); // mandatory: thinking model
     expect(body["format"]).toBe("json"); // schema mode is broken on 0.32.15
     expect(body["stream"]).toBe(false);
+    expect(body["options"]).toEqual({ num_ctx: OLLAMA_NUM_CTX }); // prompt alone is ~6.3k tokens
     expect(out.content).toBe(OK);
     expect(out.evalCount).toBe(7);
   });

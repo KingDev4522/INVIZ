@@ -11,12 +11,15 @@
  *    EMPTY. On a non-thinking model Ollama accepts and ignores it.
  * 2. `format: <json-schema>` returns HTTP 500 on this build, so structured
  *    output uses `format: "json"` plus the shared JSON-only system prompt.
+ * 3. `options.num_ctx` is always sent (OLLAMA_NUM_CTX). Ollama defaults to
+ *    4096, but the frozen system prompt alone is ~6300 tokens — without this
+ *    every call overflows, inference 500s, and all turns burn Groq quota.
  *
  * Model-agnostic: the model tag is configuration (OLLAMA_MODEL), not code.
  * Output is untrusted exactly like any cloud provider's: it flows through the
  * same extract → validateModelOutput → WebGuard pipeline.
  */
-import { OLLAMA_DEFAULT_MODEL, OLLAMA_DEFAULT_URL } from "../../../shared/constants.js";
+import { OLLAMA_DEFAULT_MODEL, OLLAMA_DEFAULT_URL, OLLAMA_NUM_CTX } from "../../../shared/constants.js";
 import { GatewayError } from "./gateway.js";
 import { logger } from "../../../shared/logger.js";
 
@@ -92,6 +95,8 @@ export interface OllamaResult {
  *                      non-thinking ones (see file header).
  * - `format: "json"`— structured-output mode; schema mode is broken on 0.32.15.
  * - `stream: false` — single response, so one call = one inference.
+ * - `options.num_ctx` — context window (OLLAMA_NUM_CTX); without it Ollama
+ *                      runs at 4096 and the system prompt overflows.
  *
  * Throws GatewayError: "network" (server down/refused), "timeout" (unavailable
  * or aborted), "auth" (unknown local state — treated as non-retryable so the
@@ -129,9 +134,10 @@ export async function postChatOllama(
         body: JSON.stringify({
           model,
           stream: false,
-          // Mandatory: without these two this model returns empty content.
+          // Mandatory: without these this model returns empty content or 500s.
           think: false,
           format: "json",
+          options: { num_ctx: OLLAMA_NUM_CTX },
           // Verified field name on Ollama 0.32.15: keeps the weights resident
           // so only the first turn of a session pays the cold load.
           ...(keepAlive !== "" ? { keep_alive: keepAlive } : {}),

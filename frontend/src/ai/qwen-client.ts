@@ -192,6 +192,17 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
     });
     return outcome;
   } catch (err) {
+    // Include a rejected skill_id (truncated) when present: it is the most
+    // common shape violation from small local models (invented id with caps /
+    // dashes / spaces), and the id alone carries no page content or secrets.
+    // Anything else about the rejected body is deliberately never logged.
+    let rejectedSkillId: string | undefined;
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      const rawId = (data as Record<string, unknown>)["skill_id"];
+      if (typeof rawId === "string" && rawId !== "") {
+        rejectedSkillId = rawId.slice(0, 80);
+      }
+    }
     logger.warn("api: chat failed", {
       turnId,
       requestType: "chat",
@@ -199,6 +210,7 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
       attempt: 1,
       outcome: "invalid-outcome",
       httpStatus: res.status,
+      ...(rejectedSkillId !== undefined ? { rejectedSkillId } : {}),
     });
     throw new QwenError(
       err instanceof ModelOutputError

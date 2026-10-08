@@ -30,6 +30,19 @@ export const TAVILY_REQUEST_TIMEOUT_MS = 15000;
 export const OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434";
 export const OLLAMA_DEFAULT_MODEL = "qwen3.5:9b-q4_K_M";
 /**
+ * Local inference context window (tokens) sent as `options.num_ctx` on every
+ * Ollama /api/chat call.
+ *
+ * Why: Ollama loads models with num_ctx 4096 unless told otherwise, but the
+ * frozen system prompt alone is ~6300 tokens and the page budget adds up to
+ * 3000 more. With 4096 the prompt overflows: inference intermittently fails
+ * (HTTP 500), the 60s local cooldown engages, and every turn falls back to
+ * Groq — whose free-tier budget (~8000 output tokens/min, shared by every key
+ * on the account) then 429s with "too many requests". 32768 fits prompt +
+ * page + output with headroom on a 16 GB machine.
+ */
+export const OLLAMA_NUM_CTX = 32768;
+/**
  * Bounded cooldown applied when the local Ollama endpoint is transiently
  * unavailable (refused / timed out), instead of latching it off for the whole
  * process lifetime.
