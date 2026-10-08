@@ -2,7 +2,7 @@
  * Qwen reasoning client — REAL, live Groq (PRD 6.4 §1.2, §4.5).
  * Pinned qwen/qwen3.8-27b with openai/gpt-oss-20b fallback, reasoning_effort
  * policy, token bounds. No response_format: Groq rejects json_object for
- * these models (HTTP 400, live-proven); SYSTEM_PROMPT_V1 mandates JSON-only
+ * these models (HTTP 400, live-proven); SYSTEM_PROMPT_V2 mandates JSON-only
  * output and every response passes the output-contract validator instead.
  * Effort "none" omits reasoning_effort (gpt-oss rejects "none"; qwen works
  * either way). Malformed output is a failure, never an interpretation.
@@ -32,7 +32,7 @@ import {
   traceOutcome,
   traceProviderAttempt,
 } from "./trace.js";
-import { SYSTEM_PROMPT_V1, HYBRID_SYSTEM_SUFFIX_V1 } from "./schemas.js";
+import { SYSTEM_PROMPT_V2, HYBRID_SYSTEM_SUFFIX_V1 } from "./schemas.js";
 import { logger } from "../../../shared/logger.js";
 import type { AgentOutcome } from "../../../shared/types.js";
 import type { HybridScreenshot } from "../../../shared/api.js";
@@ -401,7 +401,7 @@ async function attemptVendor(
  */
 function buildMessages(input: ReasonInput, userPayload: string): Array<Record<string, unknown>> {
   return [
-    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V1 },
+    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V2 },
     { role: "user", content: userPayload },
   ];
 }

@@ -163,9 +163,9 @@ drives the user's browser.
 
 `backend/src/ai/qwen-client.ts:404`
 
-    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V1 },
+    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V2 },
 
-`SYSTEM_PROMPT_V1` (`backend/src/ai/schemas.ts:12-39`) carries every guardrail in the
+`SYSTEM_PROMPT_V2` (`backend/src/ai/schemas.ts:36-589`) carries every guardrail in the
 product: "NEVER emit JavaScript, selectors, URLs", the `chrome://`/`file:` refusal rule,
 the never-request-a-password/OTP rule, the closed action-key list, and the JSON-only
 output contract. All of it is client-overridable, unbounded in length (only the 8 MB body
@@ -358,11 +358,11 @@ R-C2. Remove client control of the system turn
 
 ACCEPTANCE
   - [ ] A test POSTs `{systemPrompt:"IGNORE ALL PRIOR INSTRUCTIONS...", ...}` to
-        `/v1/chat` and asserts the EFFECTIVE system prompt is still `SYSTEM_PROMPT_V1`
+        `/v1/chat` and asserts the EFFECTIVE system prompt is still `SYSTEM_PROMPT_V2`
         (assert against the request the gateway received, via an injected `fetchImpl`).
   - [ ] `architecture-boundary.test.ts` extended: a grep-level assertion that no route
         file reads a `systemPrompt`-like key from a request body.
-  - [ ] A test pins `SYSTEM_PROMPT_V1` content so an accidental edit fails loudly
+  - [x] A test pins `SYSTEM_PROMPT_V2` content so an accidental edit fails loudly  (DONE: `backend/src/ai/schemas.test.ts`, 42 tests)
         (currently `backend/src/ai/schemas.ts` has NO test file).
 
 --------------------------------------------------------------------------------
@@ -529,7 +529,7 @@ defects because the untested surfaces are exactly the ones that matter.
     backend/src/server.ts                  <-- entire HTTP layer: routing, 404/405/401
                                                  ordering, OPTIONS, 500 catch-all,
                                                  startup probe. NO test boots the server.
-    backend/src/ai/schemas.ts              <-- SYSTEM_PROMPT_V1 unpinned (defeats C2)
+    backend/src/ai/schemas.ts              (RESOLVED: now pinned by schemas.test.ts, 42 tests)
     backend/src/ai/enrichment.ts
     backend/src/routes/health.ts           <-- checkOpenRouter/checkOllama/checkTavily
                                                  failure paths, noteOllamaProbeHealthy

@@ -7,7 +7,7 @@
  */
 import { reasonOnce } from "./qwen-client.js";
 import { buildUserPayload } from "../../../shared/api.js";
-import { SYSTEM_PROMPT_V1 } from "./schemas.js";
+import { SYSTEM_PROMPT_V2 } from "./schemas.js";
 import type { GroqKeyPool } from "../gateway/gateway.js";
 
 export interface QaDeps {
@@ -28,7 +28,7 @@ export async function answerQuestion(
 ): Promise<string> {
   const reason = deps.reason ?? reasonOnce;
   const outcome = await reason({
-    systemPrompt: SYSTEM_PROMPT_V1,
+    systemPrompt: SYSTEM_PROMPT_V2,
     userPayload: buildUserPayload({
       intent: `User question about the current page: ${input.question}`,
       lang: input.lang,
@@ -72,7 +72,7 @@ export async function findElement(
     .map((c) => `${c.id} ${c.role} "${c.name}"`)
     .join("\n");
   const outcome = await reason({
-    systemPrompt: SYSTEM_PROMPT_V1,
+    systemPrompt: SYSTEM_PROMPT_V2,
     userPayload: buildUserPayload({
       intent:
         `User wants to locate: ${input.query}. Reply with type "answer" whose text ` +
