@@ -6,6 +6,8 @@
   "description": "INVIZ marketing site (React + Vite + Tailwind 4 + shadcn/ui).",
   "scripts": {
     "dev": "vite",
+    "pack-extension": "node scripts/pack-extension.mjs",
+    "prebuild": "node scripts/pack-extension.mjs",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
