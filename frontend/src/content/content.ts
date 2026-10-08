@@ -14,7 +14,7 @@ import type {
   Announcement,
   AnnounceLang,
 } from "./focus-monitor.js";
-import { FocusMonitor } from "./focus-monitor.js";
+import { FocusMonitor, HoverCoalescer, isDescendantComposed } from "./focus-monitor.js";
 import { extractStates, getOpenDialogs, resolveRole } from "./dom-extractor.js";
 import { computeAccessibleName, fieldHasValue } from "./aria-extractor.js";
 import { STORAGE_KEY_CONFIG } from "../../../shared/constants.js";
@@ -81,18 +81,47 @@ monitor.onAnnouncement((a) => {
   }
   speakLive(a.text, a.lang);
 });
-// Hover narration (throttled): moving the mouse over interactives speaks
-// the same announcement as keyboard focus. Deduped by FocusMonitor signature.
-let lastHoverAt = 0;
+// Hover narration (cursor-aware, coalesced): the cursor settling over content
+// speaks the element under it via the hover eligibility path (headings, text
+// blocks, images with alt — focusability NOT required). Rapid movement
+// coalesces: intermediate targets may be skipped, but the latest target is
+// always flushed on the trailing edge. TTS spam is prevented downstream
+// (priority-5 focus-takeover + signature dedupe), never by dropping here.
+function deepHoverTarget(e: MouseEvent): Element | null {
+  const t = e.target;
+  if (!(t instanceof Element)) return null;
+  // elementFromPoint pierces OPEN shadow roots, so VoiceLens reads the actual
+  // inner target instead of an unannounceable shadow host. Closed roots
+  // terminate at their host (same as assistive technology — never penetrated).
+  // The composed-descendant guard means we only ever descend within the event
+  // target's own subtree: never jump to an unrelated overlay, and never touch
+  // another document (a cross-origin iframe yields the iframe element itself,
+  // which is unannounceable and stays silent).
+  try {
+    const deep = document.elementFromPoint(e.clientX, e.clientY);
+    if (deep instanceof Element && deep !== t && isDescendantComposed(t, deep)) {
+      return deep;
+    }
+  } catch {
+    // Hit-testing unavailable (or a hostile page): fall through to the event
+    // target, exactly the old behavior.
+  }
+  return t;
+}
+
+const hoverCoalescer = new HoverCoalescer((el) => {
+  const announcement = monitor.handleHover(el);
+  // Stale-state fix: the cursor is on a non-readable target, so "what is
+  // this?" must not describe an unrelated previous element.
+  if (announcement === null) lastAnnouncement = null;
+});
 document.addEventListener(
   "mouseover",
   (e: Event) => {
-    const now = Date.now();
-    if (now - lastHoverAt < 600) return;
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-    lastHoverAt = now;
-    monitor.handleFocus(target);
+    if (!(e instanceof MouseEvent)) return;
+    const target = deepHoverTarget(e);
+    if (target === null) return;
+    hoverCoalescer.push(target);
   },
   true,
 );
@@ -127,6 +156,19 @@ const observer = new PageObserver(document, {
     logger.debug("page trigger", { trigger, detail });
     if (trigger === "minor") return; // handled locally; no rebuild
     pushSnapshot();
+    // Generic SPA late-render follow-up: the route push happens before
+    // shadow-DOM/async content renders. Re-extract twice so the stored
+    // snapshot for the CURRENT url contains the late targets by the time the
+    // next voice command reads it. No site-specific logic.
+    if (trigger === "route") {
+      const urlAtRoute = location.href;
+      for (const delayMs of [1200, 3200]) {
+        setTimeout(() => {
+          if (location.href !== urlAtRoute) return;
+          pushSnapshot();
+        }, delayMs);
+      }
+    }
   },
 });
 
@@ -407,9 +449,12 @@ function showVoiceStatus(payload: Record<string, unknown>): void {
     return;
   }
   const text = payload["text"];
-  voiceOverlay.show(phase as VoicePhase, {
-    ...(typeof text === "string" && text !== "" ? { detail: text } : {}),
-  });
+  // showStatus routes agent thinking to the prominent headline and keeps
+  // transcripts/questions as detail under their phase headline.
+  voiceOverlay.showStatus(
+    phase as VoicePhase,
+    typeof text === "string" ? text : undefined,
+  );
 }
 
 // --- Wiring -------------------------------------------------------------------
@@ -498,6 +543,31 @@ chrome.runtime.onMessage.addListener(
           typeof maxChars === "number" ? maxChars : 4000,
         );
         sendResponse({ ok: true, payload: { ok: true, text } });
+        return false;
+      }
+      case "REQUEST_SNAPSHOT": {
+        // On-demand current-page pull: the worker asks for a FRESH extraction
+        // instead of trusting storage. Covers the "already-open page" case —
+        // a new voice command must reason over the CURRENT tab even when no
+        // recent push happened (SPA minor-swallow, worker restart, eviction).
+        // Responds directly (no storage race) AND pushes for future turns.
+        try {
+          const state = lens.extract(document);
+          const snapshot = {
+            url: state.url,
+            title: state.title,
+            generation: state.generation,
+            items: lens.registry.snapshot(),
+            structure: state.structure,
+            prose: state.prose,
+            skipped: state.skipped,
+            savedAt: Date.now(),
+          };
+          pushSnapshot();
+          sendResponse({ ok: true, payload: { state: snapshot } });
+        } catch {
+          sendResponse({ ok: false, errorCode: "ACTION_FAILED" });
+        }
         return false;
       }
       case "AGENT_ACTIVE": {

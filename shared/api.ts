@@ -49,6 +49,37 @@ export class BackendError extends Error {
 
 // --- POST /v1/chat ------------------------------------------------------------
 
+/**
+ * EXPERIMENTAL: a viewport screenshot for the hybrid context prototype.
+ *
+ * Opt-in only — a request without this field (or a backend whose CONTEXT_MODE
+ * is "dom") takes the exact pre-prototype text-only path. The image never
+ * carries executable intent: targets still come from the eNN registry, which
+ * the model cannot see here and cannot invent into existence (WebGuard and the
+ * registry check reject anything not in the current snapshot).
+ */
+export interface HybridScreenshot {
+  /**
+   * Raw base64 JPEG of the CURRENT TAB viewport — NO `data:` prefix, which is
+   * precisely the Ollama `messages[].images` wire format (`api.ImageData`).
+   */
+  b64: string;
+  /** Encoded pixel width actually sent (post-downscale). */
+  width: number;
+  /** Encoded pixel height actually sent (post-downscale). */
+  height: number;
+  /** Decoded payload size in bytes (not the base64 string length). */
+  bytes: number;
+  /** Original viewport dimensions before downscaling (Phase 4 measurement). */
+  sourceWidth?: number;
+  sourceHeight?: number;
+  /**
+   * Frontend Phase-8 timings in ms: capture start/end, encode start/end,
+   * packaging. Log-only telemetry — never affects reasoning or validation.
+   */
+  timings?: Record<string, number>;
+}
+
 export interface ChatRequest {
   userPayload: string;
   systemPrompt?: string;
@@ -56,6 +87,8 @@ export interface ChatRequest {
   maxCompletionTokens?: number;
   /** Voice-turn correlation id (optional, log-only; never affects reasoning). */
   turnId?: string;
+  /** EXPERIMENTAL hybrid context: ignored unless the backend is CONTEXT_MODE=hybrid. */
+  image?: HybridScreenshot;
 }
 
 export interface UserPayloadInput {

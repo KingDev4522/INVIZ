@@ -13,7 +13,8 @@
     "test": "npm run test --workspaces",
     "test-page": "node scripts/serve-test-page.js",
     "scan-secrets": "node scripts/scan-secrets.js",
-    "start-backend": "npm run start --workspace=backend"
+    "start-backend": "npm run start --workspace=backend",
+    "test-harness": "python harness/host_selftest.py"
   },
   "author": "",
   "license": "UNLICENSED",

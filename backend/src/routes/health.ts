@@ -13,6 +13,7 @@ import {
 } from "../../../shared/constants.js";
 import { GroqKeyPool } from "../gateway/gateway.js";
 import { probeOllama } from "../gateway/ollama.js";
+import { noteOllamaProbeHealthy } from "../ai/qwen-client.js";
 import { synthesizeChunk } from "../tts/groq-tts.js";
 
 export interface HealthDeps {
@@ -120,12 +121,19 @@ function checkTavily(deps: ValidationDeps): { ok: boolean; detail: string } {
  * Local provider check: reachability + exact model presence, NO inference (no
  * tokens, fast). Unconfigured = not applicable (cloud reasoning still works),
  * so it never reports a failure for someone who does not use Ollama.
+ *
+ * A positive probe is also the recovery signal for the reasoning client: it
+ * proves any local-provider suspension is stale (the operator started Ollama,
+ * or pulled the missing model), so the cooldown is cleared here instead of
+ * forcing a backend restart.
  */
 async function checkOllama(deps: ValidationDeps): Promise<{ ok: boolean; detail: string }> {
   if (deps.ollama === undefined) {
     return { ok: true, detail: "not configured — cloud reasoning only" };
   }
-  return probeOllama(deps.ollama, { fetchImpl: deps.fetchImpl });
+  const probe = await probeOllama(deps.ollama, { fetchImpl: deps.fetchImpl });
+  if (probe.ok) noteOllamaProbeHealthy();
+  return probe;
 }
 
 export async function handleValidation(

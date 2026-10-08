@@ -72,7 +72,9 @@ function emitVoiceStatus(
 }
 
 /** On-device voice activity log: the Options page renders it, so voice
- * failures are readable without DevTools. Metadata only, never speech. */
+ * failures are readable without DevTools. Metadata only, never speech.
+ * The worker owns the write (it has dependable chrome.storage access);
+ * direct writes here are best-effort only. */
 async function appendDiag(kind: string, text: string): Promise<void> {
   try {
     const stored = await chrome.storage.local.get(DIAG_KEY);
@@ -81,11 +83,22 @@ async function appendDiag(kind: string, text: string): Promise<void> {
     await chrome.storage.local.set({
       [DIAG_KEY]: pushDiag(log, { t: Date.now(), kind, text }),
     });
+    return;
+  } catch {
+    // Direct storage is not dependable in this document — fall through to
+    // the worker relay below (single source of truth for the ring buffer).
+  }
+  try {
+    await chrome.runtime.sendMessage({
+      type: "VOICE_DIAG",
+      requestId: `diag_${Date.now()}`,
+      payload: { kind, text },
+    });
   } catch {
     // Diagnostics must never break audio.
     if (!storageWarned) {
       storageWarned = true;
-      logger.warn("diag: chrome.storage unavailable in the offscreen context — voice log is not being written");
+      logger.info("diag: voice log relayed via worker (no direct storage in offscreen)");
     }
   }
 }
@@ -160,7 +173,10 @@ const controller = new AudioController(
       });
     },
     onPrimaryLatchedFallback: () => {
-      logger.warn("tts: primary latched to local speech for this session");
+      // By design VoiceLens speaks with local speechSynthesis only (the synth
+      // above always throws), so the latch after 3 primary failures is the
+      // expected steady state — info, not a warning.
+      logger.info("tts: primary latched to local speech for this session");
       void appendDiag("tts", "backend voice failed 3x — using local speech this session");
     },
     onSpeakingChange: (speaking, priority) => {
@@ -425,6 +441,9 @@ chrome.runtime.onMessage.addListener(
       }
       case "VOICE_STATUS":
         // Our own narration echoes (and the worker's relay) are not for us.
+        return false;
+      case "VOICE_DIAG":
+        // Our own worker relay echoes are not for us (prevents forward loops).
         return false;
       case "VOICE_CAPTURE_STOP": {
         turns.stopCapture();

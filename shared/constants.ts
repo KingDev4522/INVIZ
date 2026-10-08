@@ -6,8 +6,10 @@
 // --- Providers (PRD 6 §0, verified vendor facts) ---
 export const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 // OpenRouter (OpenAI-compatible chat completions): second reasoning vendor.
-// Reasoning (chat + enrich) round-robins OpenRouter ↔ Groq per request, with
-// instant failover on 429/5xx/timeout. Audio (Whisper + TTS) stays on Groq —
+// Reasoning (chat + enrich) is LOCAL-FIRST with a bounded cloud standby chain
+// [ollama -> openrouter -> groq] — NEVER rotation. A healthy local provider ends
+// the request, so normal turns spend no cloud reasoning quota; cloud is only
+// contacted after local actually fails. Audio (Whisper + TTS) stays on Groq —
 // OpenRouter has no equivalent free audio endpoints.
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 export const OPENROUTER_DEFAULT_MODEL = "google/gemma-4-26b-a4b-it:free";
@@ -19,10 +21,30 @@ export const TAVILY_MAX_RESULTS = 5;
 export const TAVILY_QUERY_MAX_CHARS = 400;
 export const TAVILY_SNIPPET_MAX_CHARS = 300;
 export const TAVILY_REQUEST_TIMEOUT_MS = 15000;
-// Ollama (local Qwen, ADDITIVE provider). Defaults match a stock local install;
-// overridable via OLLAMA_URL / OLLAMA_MODEL in backend/.env.
+// Ollama (local reasoning, ADDITIVE provider). Defaults match this deployment's
+// stock local install; overridable via OLLAMA_URL / OLLAMA_MODEL in backend/.env.
+// The tag MUST match an installed model exactly: Ollama returns HTTP 404 for an
+// unknown tag, which the gateway maps to kind "auth" and reasonOnce latches as
+// "local unavailable" for the life of the process — so a wrong tag silently
+// pushes every turn to cloud. Verify with: ollama list
 export const OLLAMA_DEFAULT_URL = "http://127.0.0.1:11434";
 export const OLLAMA_DEFAULT_MODEL = "qwen3.5:9b-q4_K_M";
+/**
+ * Bounded cooldown applied when the local Ollama endpoint is transiently
+ * unavailable (refused / timed out), instead of latching it off for the whole
+ * process lifetime.
+ *
+ * Why: the permanent latch meant "Ollama was not running when the backend
+ * started" could only be undone by restarting the backend, even after the user
+ * started Ollama. With this TTL the local provider is re-probed once the
+ * cooldown expires and recovers on its own.
+ *
+ * Bounded on purpose: long enough that a down Ollama is not hammered (one
+ * probe per minute, never a retry loop, never per-turn), short enough that a
+ * restarted Ollama is picked up quickly. A *permanent* condition (unknown model
+ * tag) is NOT retried on this timer — see backend/src/ai/qwen-client.ts.
+ */
+export const OLLAMA_SUSPEND_COOLDOWN_MS = 60_000;
 export const QWEN_PRIMARY_MODEL = "qwen/qwen3.8-27b";
 export const QWEN_FALLBACK_MODEL = "openai/gpt-oss-20b";
 export const WHISPER_PRIMARY_MODEL = "whisper-large-v3-turbo";
@@ -32,10 +54,67 @@ export const WHISPER_FALLBACK_MODEL = "whisper-large-v3";
 // set, one rate-limit story.
 export const GROQ_SPEECH_ENDPOINT = `${GROQ_BASE_URL}/audio/speech`;
 
+// --- EXPERIMENTAL: hybrid vision context (feature-flagged prototype) ---
+/**
+ * ContextLens input mode. This is a PROTOTYPE switch only — it changes what
+ * context the model is shown, never how actions are validated, guarded or
+ * executed.
+ *
+ * - "dom"  — DEFAULT and production behaviour: the existing DOM/ARIA target
+ *            registry, text-only model input. Absent/invalid flag => "dom".
+ * - "hybrid" — opt-in: a viewport screenshot is additionally captured and sent
+ *            as Ollama multimodal input next to a COMPACT target registry.
+ *            The eNN ids stay the authoritative, only grounding source.
+ *
+ * Both ends must opt in: the extension (config:user -> contextMode) captures
+ * only when it says "hybrid", and the backend (CONTEXT_MODE env) forwards an
+ * image only when it says "hybrid". Either one left at "dom" keeps the exact
+ * pre-prototype behaviour, so there is no way to enable this by accident.
+ */
+export const CONTEXT_MODES = ["dom", "hybrid"] as const;
+export type ContextMode = (typeof CONTEXT_MODES)[number];
+export const CONTEXT_MODE_DEFAULT: ContextMode = "dom";
+
+/**
+ * Hard cap on the base64 length of a hybrid screenshot accepted by /v1/chat.
+ *
+ * The transport cap is 8 MB (backend/src/http.ts MAX_BODY_BYTES), so this is
+ * the budget left for the image once the text payload is accounted for. It is
+ * deliberately far above a normal downscaled JPEG (~100-250 KB base64): it
+ * exists to reject a runaway/undownscaled capture deterministically, not to
+ * be a target size. Oversized images are dropped and the request continues as
+ * plain DOM context rather than failing the turn.
+ */
+export const MAX_HYBRID_IMAGE_B64_CHARS = 1_500_000;
+
+/** Upper bound on the long edge of a hybrid screenshot (px) before encoding. */
+export const HYBRID_IMAGE_MAX_DIMENSION = 1024;
+
+/** JPEG quality used for the hybrid screenshot (0..1). */
+export const HYBRID_IMAGE_JPEG_QUALITY = 0.6;
+
+/**
+ * Parses an untrusted config value into a ContextMode. Anything that is not
+ * exactly "hybrid" (after trimming/case-folding) is "dom" — an experiment must
+ * never be switched on by a typo, an empty value or an unexpected type.
+ */
+export function parseContextMode(raw: unknown): ContextMode {
+  if (typeof raw !== "string") return CONTEXT_MODE_DEFAULT;
+  const normalized = raw.trim().toLowerCase();
+  return (CONTEXT_MODES as readonly string[]).includes(normalized)
+    ? (normalized as ContextMode)
+    : CONTEXT_MODE_DEFAULT;
+}
+
 // --- Task / loop budgets (PRD 6 §4.4) ---
 export const MAX_ACTIONS_PER_TASK = 25;
 export const MAX_RECOVERY_ATTEMPTS_PER_ACTION = 3;
 export const MAX_QWEN_CALLS_PER_TASK = 30;
+/** Web-search budget: Tavily costs 1 credit/search at basic depth, so the
+ *  model gets at most this many searches per task. The controller refuses
+ *  further searches deterministically (duplicate, navigational, over-budget)
+ *  and tells the model to answer from observations or navigate instead. */
+export const MAX_SEARCHES_PER_TASK = 2;
 /** Enrichment calls (intent classification) have their own budget so they
  *  never starve the reasoning loop's 30-call allowance. */
 export const MAX_ENRICH_CALLS_PER_TASK = 5;
@@ -55,6 +134,11 @@ export const WAITING_FOR_CONFIRMATION_TTL_MS = 90_000;
 export const OPEN_SITE_ALLOWLIST: Readonly<Record<string, string>> = {
   youtube: "https://www.youtube.com/",
   github: "https://github.com/",
+  twitter: "https://x.com/",
+  x: "https://x.com/",
+  google: "https://www.google.com/",
+  reddit: "https://www.reddit.com/",
+  wikipedia: "https://www.wikipedia.org/",
 };
 
 // --- Qwen call policy (PRD 6 §4.5) ---
@@ -129,6 +213,11 @@ export const STORAGE_KEY_CONFIG = "config:user";
 export const STORAGE_KEY_CREDENTIALS = "credentials:local";
 export const STORAGE_KEY_SKILLS = "skills:registry";
 export const STORAGE_KEY_EPISODES = "episodes:store";
+/** User-saved ordinary details (name/email/phone/address) for form fill.
+ *  Device-local (chrome.storage.local), same class as the backend URL/token.
+ *  Secrets (passwords/OTP/cards) are NEVER stored here — fixed field
+ *  allowlist in shared/profile.ts makes that unrepresentable. */
+export const STORAGE_KEY_PROFILE = "profile:user";
 export const pageStateKey = (tabId: number): string => `page:tab:${tabId}`;
 
 // --- Learning layer (PRD Phase 5/6): bounded episode storage ---------------

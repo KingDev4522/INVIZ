@@ -8,6 +8,10 @@
 import { STORAGE_KEY_TASK } from "../../../../shared/constants.js";
 import { logger } from "../../../../shared/logger.js";
 import type { StructuredAction } from "../../../../shared/types.js";
+import type {
+  ResultContinuation,
+  SearchStrategy,
+} from "../agent-controller/search-strategy.js";
 
 export type TaskStatus =
   | "ACTIVE"
@@ -35,6 +39,9 @@ export interface PendingConfirmation {
   action: StructuredAction | null;
 }
 
+/** PRD 6.10 §16: which search capability this task is using. */
+export type SearchMode = "none" | "browser" | "page" | "web_research";
+
 export interface TaskSnapshot {
   taskId: string;
   goal: string;
@@ -50,6 +57,30 @@ export interface TaskSnapshot {
   pendingQuestion: PendingQuestion | null;
   pendingConfirmation: PendingConfirmation | null;
   lastVerifiedResult: string | null;
+  /** PRD 6.10 §16: search-mode tracking. Optional so older persisted tasks
+   *  still load; absent means "none". Set by the controller, never by the
+   *  model. */
+  searchMode?: SearchMode;
+  /** Search Strategy + Result-Type Routing (additive): semantic strategies
+   *  selected for this task's searches (primary first). Optional; absent
+   *  means unselected. Set by the controller, never by the model. */
+  searchStrategies?: SearchStrategy[];
+  /** Pending goal-specific follow-up after a search whose goal needs more
+   *  than the results state (open/play/read/link). A found URL is
+   *  intermediate evidence, not completion: the next reasoning step must
+   *  ground the continuation from a fresh observation. Null/absent means no
+   *  follow-up is owed (search-only goal, or a verified action already
+   *  consumed it). Cleared by the next verified action. */
+  pendingResultRouting?: {
+    continuation: ResultContinuation;
+    query: string;
+    strategies: SearchStrategy[];
+  } | null;
+  /** Web-search accounting (per-task Tavily budget). Optional so persisted
+   *  tasks from older builds still load; absent means zero searches so far. */
+  searchCount?: number;
+  /** Normalized queries already spent this task (duplicate-search guard). */
+  searchedQueries?: string[];
   /** Ordinary user-provided values (never secrets — memory-only rule). */
   providedValues: Record<string, string>;
   /** Values are NEVER stored here (memory-only rule, PRD 6 §6). */

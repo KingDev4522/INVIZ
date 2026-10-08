@@ -1,0 +1,273 @@
+/**
+ * INVIZ Options page — strict monochrome theme (off-white paper / off-black
+ * ink, inverted under prefers-color-scheme: dark). Scoped to the options page
+ * only (popup keeps shared ui.css untouched).
+ *
+ * Shape rule (one scale, followed everywhere): cards 14px, inputs 10px,
+ * buttons full-pill. Motion: transform/opacity only, collapsed under
+ * prefers-reduced-motion.
+ */
+:root {
+  --paper: #fafafa;
+  --card: #ffffff;
+  --ink: #0a0a0a;
+  --ink-soft: #525252;
+  --ink-faint: #737373;
+  --line: #e5e5e5;
+  --console: #0a0a0a;
+  --console-ink: #f5f5f5;
+  --focus: #0a0a0a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0a0a0a;
+    --card: #141414;
+    --ink: #f5f5f5;
+    --ink-soft: #d4d4d4;
+    --ink-faint: #a3a3a3;
+    --line: #262626;
+    --console: #000000;
+    --console-ink: #f5f5f5;
+    --focus: #f5f5f5;
+  }
+}
+
+.options-page {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: system-ui, "Segoe UI", "Nirmala UI", sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100dvh;
+  -webkit-font-smoothing: antialiased;
+}
+
+.options-shell {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 56px 32px 96px;
+}
+
+/* Header: one eyebrow on the whole page, tight heavy headline, 65ch lede. */
+.options-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 16px;
+}
+
+.options-title {
+  font-size: clamp(2rem, 4.5vw, 3rem);
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+  margin: 0 0 16px;
+  text-wrap: balance;
+}
+
+.options-lede {
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--ink-soft);
+  max-width: 65ch;
+  margin: 0 0 40px;
+}
+
+.options-lede strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Cards: elevation only through border + spacing, never shadows. */
+.options-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 28px;
+  margin: 0 0 20px;
+  animation: options-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.options-card:nth-of-type(2) { animation-delay: 0.06s; }
+.options-card:nth-of-type(3) { animation-delay: 0.12s; }
+.options-card:nth-of-type(4) { animation-delay: 0.18s; }
+.options-card:nth-of-type(5) { animation-delay: 0.24s; }
+
+@keyframes options-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.options-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 6px;
+}
+
+.options-index {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.options-card h2 {
+  font-size: 1.2rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.options-card > p {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  max-width: 65ch;
+  margin: 12px 0 0;
+}
+
+/* Form rows. */
+.options-field {
+  margin-top: 18px;
+}
+
+.options-field label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.options-field input {
+  width: 100%;
+  max-width: 560px;
+  box-sizing: border-box;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 14px;
+  transition: border-color 0.2s ease;
+}
+
+.options-field input::placeholder {
+  color: var(--ink-faint);
+}
+
+.options-field input:focus {
+  outline: none;
+  border-color: var(--ink);
+}
+
+/* Buttons: one primary (solid), the rest ghost. Single-line labels. */
+.options-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.options-btn {
+  font-size: 0.92rem;
+  font-weight: 600;
+  white-space: nowrap;
+  border-radius: 999px;
+  padding: 10px 22px;
+  cursor: pointer;
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  transition: transform 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.options-btn:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.options-btn:active {
+  transform: scale(0.98);
+}
+
+.options-btn-primary {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.options-btn-primary:hover {
+  opacity: 0.82;
+}
+
+.options-btn:focus-visible,
+.options-field input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* Inline statuses: tabular numbers, wrap instead of overflow. */
+.options-status {
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* Console panels: the one inverted component, used for both outputs. */
+.options-console {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  background: var(--console);
+  color: var(--console-ink);
+  border-radius: 10px;
+  padding: 18px 20px;
+  margin: 18px 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 3.2em;
+}
+
+.options-console:empty {
+  display: none;
+}
+
+/* Footer save row. */
+.options-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 640px) {
+  .options-shell {
+    padding: 36px 18px 72px;
+  }
+
+  .options-card {
+    padding: 22px 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .options-card {
+    animation: none;
+  }
+
+  .options-btn {
+    transition: none;
+  }
+}

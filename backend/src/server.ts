@@ -7,6 +7,7 @@
 import http from "node:http";
 import { configSummary, loadConfig, loadDotEnv } from "./config.js";
 import { GroqKeyPool } from "./gateway/gateway.js";
+import { probeOllama } from "./gateway/ollama.js";
 import { checkAuth, logRequest, readJsonBody, sendError, sendJson, setCors } from "./http.js";
 import { handleChat } from "./routes/chat.js";
 import { handleEnrich } from "./routes/enrich.js";
@@ -102,7 +103,13 @@ const server = http.createServer((req, res) => {
       let result: { status: number; payload: unknown };
       switch (path) {
         case "/v1/chat":
-          result = await handleChat(body, { pool, ...reasoningExtras, fetchImpl });
+          result = await handleChat(body, {
+            pool,
+            ...reasoningExtras,
+            fetchImpl,
+            // EXPERIMENTAL: chat is the only route that can receive an image.
+            contextMode: config.contextMode,
+          });
           break;
         case "/v1/enrich":
           result = await handleEnrich(body, { pool, ...reasoningExtras, fetchImpl });
@@ -144,9 +151,62 @@ const server = http.createServer((req, res) => {
   })().catch(() => undefined);
 });
 
+/**
+ * Startup diagnostics for the reasoning chain.
+ *
+ * Answers, in one place at boot: which provider leads, which local model is
+ * configured, and — critically — whether that local model is actually reachable
+ * RIGHT NOW. The root-cause finding behind this was that a backend started
+ * while Ollama was down looked identical to a healthy one until a voice turn
+ * silently fell back to cloud.
+ *
+ * Presence/counts/reachability only: no key material, no prompts.
+ * NEVER throws and NEVER prevents startup — an unavailable local provider is a
+ * degraded-but-working configuration (cloud fallback exists exactly for this).
+ */
+async function reportStartupReasoningStatus(): Promise<void> {
+  logger.info("startup: reasoning configuration", {
+    llmProvider: config.llmProvider,
+    localOllamaConfigured: ollama !== undefined,
+    ...(ollama !== undefined ? { ollamaModel: ollama.model } : {}),
+  });
+  if (ollama === undefined) {
+    logger.info("startup: local reasoning not configured - cloud reasoning only", {
+      llmProvider: config.llmProvider,
+    });
+    return;
+  }
+  try {
+    const probe = await probeOllama(ollama, { fetchImpl, timeoutMs: 5000 });
+    if (probe.ok) {
+      logger.info("startup: local Ollama AVAILABLE", {
+        ollamaModel: ollama.model,
+        detail: probe.detail,
+      });
+      return;
+    }
+    const pinnedToLocal = config.llmProvider === "ollama";
+    logger.warn(
+      pinnedToLocal
+        ? "startup: LLM_PROVIDER=ollama but local Ollama is unavailable - every turn will fall back to cloud (Groq/OpenRouter). Start Ollama, then press Validate backend (live) or wait for the cooldown; the local provider re-probes automatically."
+        : "startup: local Ollama unavailable - cloud reasoning will be used until it recovers",
+      { ollamaModel: ollama.model, detail: probe.detail },
+    );
+  } catch (err) {
+    logger.warn("startup: local Ollama probe failed - cloud reasoning will be used", {
+      ollamaModel: ollama.model,
+    });
+    void err;
+  }
+}
+
 server.listen(config.port, "127.0.0.1", () => {
   logger.info("backend listening", {
     ...configSummary(config),
     url: `http://127.0.0.1:${config.port}`,
+    port: config.port,
   });
+  // Diagnostics run AFTER the socket is bound: the service must be reachable
+  // even if Ollama is down or the probe itself is slow.
+  void reportStartupReasoningStatus().catch(() => undefined);
 });

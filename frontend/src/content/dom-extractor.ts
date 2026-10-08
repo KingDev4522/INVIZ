@@ -296,10 +296,9 @@ export interface InteractiveSet {
  * visual order is approximately preserved). Closed shadow roots are
  * unreachable by design and stay invisible — same as assistive technology.
  *
- * Why this exists: component frameworks (YouTube's polymer renderers, video
- * players, consent dialogs) mount their controls inside shadow DOM. A flat
- * document.querySelectorAll sees the page chrome but none of the content, so
- * "play the 1st video" had no target and the model asked irrelevant questions.
+ * Why this exists: component frameworks mount their controls inside shadow
+ * DOM. A flat document.querySelectorAll sees the page chrome but none of
+ * the shadow content, leaving contextual actions with no target.
  */
 export function queryDeep(
   root: ParentNode,

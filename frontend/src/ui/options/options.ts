@@ -5,7 +5,8 @@
  * Validation calls the backend's own /v1/health + /v1/validation contracts.
  * Provider keys live exclusively in the backend .env (never here, never logged).
  */
-import { STORAGE_KEY_CREDENTIALS } from "../../../../shared/constants.js";
+import { STORAGE_KEY_CREDENTIALS, STORAGE_KEY_PROFILE } from "../../../../shared/constants.js";
+import { sanitizeProfile, type UserProfile } from "../../../../shared/profile.js";
 import { ENDPOINTS, type ValidationResponse } from "../../../../shared/api.js";
 import {
   DIAG_KEY,
@@ -21,6 +22,11 @@ const saveResult = document.getElementById("save-result") as HTMLSpanElement;
 const micResult = document.getElementById("mic-result") as HTMLSpanElement;
 const diagResultEl = document.getElementById("diag-result") as HTMLPreElement;
 const diagLogEl = document.getElementById("diag-log") as HTMLPreElement;
+const profileNameEl = document.getElementById("profile-name") as HTMLInputElement;
+const profileEmailEl = document.getElementById("profile-email") as HTMLInputElement;
+const profilePhoneEl = document.getElementById("profile-phone") as HTMLInputElement;
+const profileAddressEl = document.getElementById("profile-address") as HTMLInputElement;
+const profileResult = document.getElementById("profile-result") as HTMLSpanElement;
 
 /** Renders the on-device voice activity ring (newest first). */
 async function loadDiagLog(): Promise<void> {
@@ -449,6 +455,66 @@ async function onRunDiagnostics(): Promise<void> {
   );
 }
 
+/**
+ * My details: ordinary contact info for form fill. Values are sanitized
+ * through the shared allowlist (name/email/phone/address only — secrets
+ * unrepresentable) and stored device-local. Presence is shown; the email
+ * box is refilled for convenience, never the other fields. Nothing logged.
+ */
+function readProfileForm(): UserProfile {
+  return sanitizeProfile({
+    name: profileNameEl.value,
+    email: profileEmailEl.value,
+    phone: profilePhoneEl.value,
+    address: profileAddressEl.value,
+  });
+}
+
+async function loadProfile(): Promise<void> {
+  try {
+    const stored = await chrome.storage.local.get(STORAGE_KEY_PROFILE);
+    const profile = sanitizeProfile(stored[STORAGE_KEY_PROFILE]);
+    if (profile.email !== undefined) profileEmailEl.value = profile.email;
+    const count = Object.keys(profile).length;
+    profileResult.textContent =
+      count === 0
+        ? "No details saved yet."
+        : `Saved: ${Object.keys(profile).join(", ")}.`;
+  } catch {
+    profileResult.textContent = "Could not read saved details.";
+  }
+}
+
+async function onSaveProfile(): Promise<void> {
+  const profile = readProfileForm();
+  if (Object.keys(profile).length === 0) {
+    profileResult.textContent = "Nothing to save — fill at least one field.";
+    return;
+  }
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY_PROFILE]: profile });
+    profileNameEl.value = "";
+    profilePhoneEl.value = "";
+    profileAddressEl.value = "";
+    profileResult.textContent = `Saved on this machine: ${Object.keys(profile).join(", ")}.`;
+  } catch {
+    profileResult.textContent = "Could not save details.";
+  }
+}
+
+async function onClearProfile(): Promise<void> {
+  try {
+    await chrome.storage.local.remove(STORAGE_KEY_PROFILE);
+  } catch {
+    // Already gone.
+  }
+  profileNameEl.value = "";
+  profileEmailEl.value = "";
+  profilePhoneEl.value = "";
+  profileAddressEl.value = "";
+  profileResult.textContent = "Details cleared from this machine.";
+}
+
 async function refreshMicStatus(): Promise<void> {
   try {
     const status = await navigator.permissions.query({
@@ -483,7 +549,14 @@ document
 document
   .getElementById("clear-diag")
   ?.addEventListener("click", () => void clearDiagLog());
+document
+  .getElementById("save-profile")
+  ?.addEventListener("click", () => void onSaveProfile());
+document
+  .getElementById("clear-profile")
+  ?.addEventListener("click", () => void onClearProfile());
 
 void loadSaved();
 void refreshMicStatus();
 void loadDiagLog();
+void loadProfile();

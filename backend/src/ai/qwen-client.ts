@@ -8,6 +8,7 @@
  * either way). Malformed output is a failure, never an interpretation.
  */
 import {
+  OLLAMA_SUSPEND_COOLDOWN_MS,
   QWEN_CONTRACT_RETRY_HEADROOM,
   QWEN_FALLBACK_MODEL,
   QWEN_MAX_COMPLETION_TOKENS_INTERACTIVE,
@@ -24,11 +25,40 @@ import {
   validateModelOutput,
   ModelOutputError,
 } from "../../../shared/response-validator.js";
-import { SYSTEM_PROMPT_V1 } from "./schemas.js";
+import {
+  traceContractRetry,
+  traceFallback,
+  traceFailure,
+  traceOutcome,
+  traceProviderAttempt,
+} from "./trace.js";
+import { SYSTEM_PROMPT_V1, HYBRID_SYSTEM_SUFFIX_V1 } from "./schemas.js";
 import { logger } from "../../../shared/logger.js";
 import type { AgentOutcome } from "../../../shared/types.js";
+import type { HybridScreenshot } from "../../../shared/api.js";
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high";
+
+/**
+ * EXPERIMENTAL Phase-8 latency marks. Created by the route (which owns T1),
+ * filled in by the reasoning path (T7/T8/T9), then read back to emit a single
+ * consolidated record.
+ *
+ * Pure observation: nothing here is ever consulted for a decision, so adding
+ * it cannot alter behaviour, budgets or validation.
+ */
+export interface LatencyMarks {
+  /** T1: request received by the route. */
+  t1: number;
+  /** T7: model request sent (the serving provider). */
+  t7?: number;
+  /** T8: model response received. */
+  t8?: number;
+  /** T9: structured output validated. */
+  t9?: number;
+  /** Provider that produced the marked response. */
+  provider?: ReasoningProvider;
+}
 
 export interface ReasonInput {
   systemPrompt?: string;
@@ -56,6 +86,19 @@ export interface ReasonInput {
   turnId?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** Injectable clock (test seam) for the local-provider cooldown. */
+  now?: () => number;
+  /**
+   * EXPERIMENTAL hybrid context: viewport screenshot (raw base64 JPEG).
+   *
+   * Attached ONLY to the local Ollama call, because that is the provider whose
+   * multimodal wire format was verified for this model. The cloud standby path
+   * is untouched: on fallback it sends the same text-only body it always has,
+   * so a degraded (text-only) hybrid turn still carries the compact registry.
+   */
+  image?: HybridScreenshot;
+  /** EXPERIMENTAL Phase-8 marks. Optional, observation only. */
+  latency?: LatencyMarks;
 }
 
 type ReasoningProvider = "ollama" | "openrouter" | "groq";
@@ -71,18 +114,92 @@ let roundRobinCursor = 0; // retained only so __resetReasoningRotation stays tot
  * restart. A dead key must not cost a wasted call on every turn.
  */
 let openrouterSuspended = false;
+
 /**
- * Latched when the local Ollama endpoint is unreachable/misconfigured. Local
- * inference that is down must not add latency to every single turn; Groq takes
- * over immediately and the latch is cleared by a restart.
+ * Local Ollama availability state.
+ *
+ * A local endpoint that is DOWN must not add latency to every turn, so the
+ * local provider is skipped while suspended and cloud takes over immediately.
+ * The suspension is BOUNDED so a transient outage is self-healing: starting
+ * Ollama later must recover local inference WITHOUT a backend restart (the
+ * permanent latch this replaced forced exactly that restart).
+ *
+ * Two kinds, deliberately different:
+ * - transient (any availability fault: "network", "timeout", "provider"/5xx)
+ *   -> time-boxed for OLLAMA_SUSPEND_COOLDOWN_MS, then eligible for exactly one
+ *   fresh probe. Re-fails -> re-armed.
+ * - permanent ("auth" = unknown model tag, HTTP 404) -> never retried on a
+ *   timer: a wrong tag cannot fix itself, and re-probing every turn would only
+ *   re-pay the round trip. Cleared only by a live /api/tags probe that reports
+ *   the model installed, or by a process restart.
  */
-let ollamaSuspended = false;
+interface OllamaSuspendState {
+  /** Skip the local provider while true. */
+  suspended: boolean;
+  /** True when the condition cannot fix itself (unknown model tag). */
+  permanent: boolean;
+  /** Epoch ms at which a time-boxed suspension becomes eligible again. */
+  retryAt: number;
+}
+
+function freshOllamaSuspend(): OllamaSuspendState {
+  return { suspended: false, permanent: false, retryAt: 0 };
+}
+
+let ollamaSuspend = freshOllamaSuspend();
+
+/**
+ * Should the local provider be skipped for this operation?
+ *
+ * On expiry the state is cleared HERE, so the caller goes straight on to make a
+ * single fresh attempt — recovery costs one request, not a probe + a request.
+ */
+function ollamaIsSuspended(nowMs: number): boolean {
+  if (!ollamaSuspend.suspended) return false;
+  if (!ollamaSuspend.permanent && nowMs >= ollamaSuspend.retryAt) {
+    ollamaSuspend = freshOllamaSuspend();
+    logger.info("reasoning: local Ollama cooldown elapsed - retrying local inference", {
+      provider: "ollama",
+    });
+    return false;
+  }
+  return true;
+}
+
+/** Arm the cooldown after a transient local failure (idempotent re-arm). */
+function suspendOllamaTemporarily(nowMs: number, kind: string): void {
+  if (ollamaSuspend.permanent) return; // never downgrade a permanent condition
+  ollamaSuspend = {
+    suspended: true,
+    permanent: false,
+    retryAt: nowMs + OLLAMA_SUSPEND_COOLDOWN_MS,
+  };
+  logger.warn("reasoning: local Ollama unavailable - cloud fallback, local re-probed after cooldown", {
+    provider: "ollama",
+    kind,
+    cooldownMs: OLLAMA_SUSPEND_COOLDOWN_MS,
+  });
+}
+
+/**
+ * Live recovery hook for the Ollama health/validation path: a probe that
+ * positively confirms reachability AND model presence proves any suspension is
+ * stale, so clear it. Lets `POST /v1/validation` un-suspend the local provider
+ * the moment the operator starts Ollama (or pulls the missing model).
+ */
+export function noteOllamaProbeHealthy(): void {
+  if (!ollamaSuspend.suspended) return;
+  ollamaSuspend = freshOllamaSuspend();
+  logger.info("reasoning: local Ollama recovered - suspension cleared by live probe", {
+    provider: "ollama",
+  });
+}
 
 /** Test-only reset for latches (deterministic assertions). */
 export function __resetReasoningRotation(): void {
   roundRobinCursor = 0;
   openrouterSuspended = false;
-  ollamaSuspended = false;
+  ollamaSuspend = freshOllamaSuspend();
 }
 
 /**
@@ -183,6 +300,7 @@ async function attemptVendor(
   let lastError: QwenError | null = null;
   for (let i = 0; i < models.length; i += 1) {
     const model = models[i] ?? QWEN_PRIMARY_MODEL;
+    if (i > 0) traceProviderAttempt(input.turnId, provider, model);
     try {
       // Contract-level retry: reasoning models intermittently answer with prose,
       // a fenced block, or a stray key. One corrective re-ask with extra token
@@ -190,13 +308,26 @@ async function attemptVendor(
       // Only a *rejected reply* is retried — never a transport/provider error.
       let userPayload = input.userPayload;
       for (let attempt = 0; attempt < CONTRACT_ATTEMPTS; attempt += 1) {
+        // Phase-8 marks: written per attempt so the FINAL values always
+        // describe the provider that actually served the turn (a failed local
+        // attempt is overwritten by the standby that answered).
+        const marks = input.latency;
+        if (marks !== undefined) marks.t7 = Date.now();
         // eslint-disable-next-line no-await-in-loop
         const res = await chat(model, userPayload, attempt);
+        if (marks !== undefined) {
+          marks.t8 = Date.now();
+          marks.provider = provider;
+        }
         const content = extractContent(res);
         try {
-          return validateModelOutput(content);
+          const outcome = validateModelOutput(content);
+          if (marks !== undefined) marks.t9 = Date.now();
+          traceOutcome(input.turnId, outcome, attempt);
+          return outcome;
         } catch (err) {
           if (err instanceof ModelOutputError && attempt + 1 < CONTRACT_ATTEMPTS) {
+            traceContractRetry(input.turnId, attempt);
             userPayload = input.userPayload + correctionSuffix(err.message);
             continue;
           }
@@ -219,14 +350,32 @@ async function attemptVendor(
             errorCode: "PROVIDER_AUTH",
           });
         }
-        if (provider === "ollama" && (err.kind === "auth" || err.kind === "network")) {
-          // Missing model or Ollama not running: latch off so turns don't each
-          // pay a connection timeout before failing over.
-          ollamaSuspended = true;
-          logger.warn("reasoning: local Ollama unavailable — latched to cloud", {
-            provider,
-            kind: err.kind,
-          });
+        if (provider === "ollama") {
+          const nowMs = (input.now ?? Date.now)();
+          if (err.kind === "auth") {
+            // Unknown model tag (Ollama HTTP 404). Permanent: not retried on a
+            // timer. Only a live probe that finds the model installed, or a
+            // restart, clears it.
+            ollamaSuspend = {
+              suspended: true,
+              permanent: true,
+              retryAt: Number.POSITIVE_INFINITY,
+            };
+            logger.error("reasoning: local Ollama model tag not found - not retried", {
+              provider,
+              kind: err.kind,
+            });
+          } else if (err.kind !== "schema") {
+            // Availability faults: "network" (not running / refused),
+            // "timeout" (too slow) and "provider" (HTTP 5xx — e.g. Ollama is up
+            // but failed to load the model, or is out of memory). All of them
+            // cost a full round trip on EVERY turn if left unsuspended, so all
+            // of them get the same bounded cooldown.
+            suspendOllamaTemporarily(nowMs, err.kind);
+          }
+          // NOTE: "schema" (malformed/empty local output) is deliberately NOT
+          // suspended — that is a model-capability fault, not an availability
+          // one, and each turn must be free to try local again.
         }
         // Fallback model is for provider/model failures, not for auth or
         // rate-limit states (rotating models cannot fix those — but the OTHER
@@ -244,13 +393,23 @@ async function attemptVendor(
   throw lastError ?? new QwenError("reasoning failed", true);
 }
 
+/**
+ * The system + user message pair shared by every provider.
+ *
+ * Deliberately image-free: the cloud standby bodies must stay byte-identical to
+ * pre-prototype behaviour. Multimodal input is added only in localChatBody.
+ */
+function buildMessages(input: ReasonInput, userPayload: string): Array<Record<string, unknown>> {
+  return [
+    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V1 },
+    { role: "user", content: userPayload },
+  ];
+}
+
 function chatBody(input: ReasonInput, userPayload: string, attempt: number): Record<string, unknown> {
   const effort = input.effort ?? "none";
   return {
-    messages: [
-      { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V1 },
-      { role: "user", content: userPayload },
-    ],
+    messages: buildMessages(input, userPayload),
     // reasoning_effort only when reasoning is actually requested.
     ...(effort !== "none" ? { reasoning_effort: effort } : {}),
     max_completion_tokens:
@@ -261,18 +420,47 @@ function chatBody(input: ReasonInput, userPayload: string, attempt: number): Rec
   };
 }
 
-/** Chat-shaped content for the local model (Ollama takes the same messages). */
+/**
+ * Chat-shaped content for the local model (Ollama takes the same messages).
+ *
+ * This is the ONLY place an image is attached, and the only place the hybrid
+ * instruction is appended — so the vision rules and the screenshot always
+ * travel together. Never telling a text-only cloud model "you are given a
+ * screenshot" avoids an instruction the model cannot satisfy (a hallucination
+ * trap on the fallback path).
+ */
 function localChatBody(input: ReasonInput, userPayload: string, attempt: number): Record<string, unknown> {
-  return { messages: chatBody(input, userPayload, attempt).messages };
+  const messages = buildMessages(input, userPayload);
+  const image = input.image;
+  if (image !== undefined) {
+    for (const message of messages) {
+      if (message["role"] === "system") {
+        message["content"] = `${String(message["content"])}${HYBRID_SYSTEM_SUFFIX_V1}`;
+      } else if (message["role"] === "user") {
+        // Ollama multimodal wire format (verified live): raw base64 strings in
+        // an array, no data: prefix — `api.ImageData` decodes to []byte.
+        message["images"] = [image.b64];
+      }
+    }
+    logger.info("ollama: multimodal request", {
+      provider: "ollama",
+      ...(input.turnId !== undefined && input.turnId !== "" ? { turnId: input.turnId } : {}),
+      imageBytes: image.bytes,
+      imageWidth: image.width,
+      imageHeight: image.height,
+    });
+  }
+  return { messages };
 }
 
 export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
+  const nowMs = (input.now ?? Date.now)();
   const orRef =
     input.openrouter !== undefined && input.openrouter.apiKey !== "" && !openrouterSuspended
       ? input.openrouter
       : null;
   const localRef =
-    input.ollama !== undefined && input.ollama.url !== "" && !ollamaSuspended
+    input.ollama !== undefined && input.ollama.url !== "" && !ollamaIsSuspended(nowMs)
       ? input.ollama
       : null;
   // Preference order: local (free, unmetered) → OpenRouter → Groq. Groq is
@@ -283,10 +471,28 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
     "groq",
   ];
   const order = reasoningOrder(available, input.llmProvider ?? "auto");
+  // P0-1: images are local-only. If one arrived but no local provider is
+  // eligible, it stays out of every cloud request below (localChatBody is the
+  // only place images attach). Log the text-only downgrade once per call.
+  if (input.image !== undefined && localRef === null) {
+    logger.info("hybrid: local unavailable; continuing text-only (image never sent to cloud)", {
+      ...(input.turnId !== undefined && input.turnId !== "" ? { turnId: input.turnId } : {}),
+      imageBytes: input.image.bytes,
+      imageWidth: input.image.width,
+      imageHeight: input.image.height,
+    });
+  }
   let lastError: QwenError | null = null;
+  // A 429 on ANY provider means quota exhaustion, even when a later
+  // provider fails differently (e.g. Groq 429s, then the local model fumbles
+  // the JSON contract). Without this the caller reports the LAST error
+  // (500/contract) and the user hears "AI service unavailable" for what is
+  // really "wait a minute and retry".
+  let sawRateLimit = false;
   for (const provider of order) {
     try {
       if (provider === "ollama" && localRef !== null) {
+        traceProviderAttempt(input.turnId, provider, localRef.model);
         logger.info("reasoning via ollama", {
           provider: "ollama",
           model: localRef.model,
@@ -295,7 +501,7 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
         // Local inference: SINGLE attempt (no hidden retry) — a slow local
         // model must not multiply requests per turn.
         // eslint-disable-next-line no-await-in-loop
-        return await attemptVendor(
+        const outcome = await attemptVendor(
           provider,
           [localRef.model],
           (model, userPayload, attempt) =>
@@ -316,8 +522,14 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
             })),
           input,
         );
+        // Reached ONLY on success: clear any cooldown so a recovered local
+        // provider stays eligible for every following turn. A failure throws
+        // above, re-arming the cooldown instead.
+        noteOllamaProbeHealthy();
+        return outcome;
       }
       if (provider === "openrouter" && orRef !== null) {
+        traceProviderAttempt(input.turnId, provider, orRef.model);
         logger.info("reasoning via openrouter", { provider: "openrouter", model: orRef.model });
         // eslint-disable-next-line no-await-in-loop
         return await attemptVendor(
@@ -334,6 +546,7 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
           input,
         );
       }
+      traceProviderAttempt(input.turnId, provider, QWEN_PRIMARY_MODEL);
       logger.info("reasoning via groq", { provider: "groq", model: QWEN_PRIMARY_MODEL });
       // eslint-disable-next-line no-await-in-loop
       return await attemptVendor(
@@ -355,6 +568,9 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
       // each provider at most once, so this can never loop. Cloud is touched
       // ONLY after the local provider actually failed.
       if (err instanceof QwenError) {
+        const at = order.indexOf(provider);
+        const next = at >= 0 ? order[at + 1] : undefined;
+        traceFallback(input.turnId, provider, next ?? "(exhausted)", fallbackReasonFor(provider, err));
         logger.warn("reasoning provider failed; failing over", {
           provider,
           ...(input.turnId !== undefined && input.turnId !== "" ? { turnId: input.turnId } : {}),
@@ -363,11 +579,24 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
           fallbackReason: fallbackReasonFor(provider, err),
           reason: err.message,
         });
+        if (err.httpStatus === 429) sawRateLimit = true;
         lastError = err;
         continue;
       }
       throw err;
     }
   }
+  if (sawRateLimit && lastError !== null && lastError.httpStatus !== 429) {
+    // Quota was the root cause; the terminal error is just noise. Surface
+    // 429 so the route layer answers RATE_LIMITED ("wait and retry") instead
+    // of REASONING_FAILED ("AI service unavailable").
+    traceFailure(input.turnId, "all-providers", "quota-exhausted");
+    throw new QwenError(
+      `all reasoning providers failed after quota exhaustion: ${lastError.message}`,
+      false,
+      429,
+    );
+  }
+  traceFailure(input.turnId, "all-providers", "reasoning-failed");
   throw lastError ?? new QwenError("reasoning failed", true);
 }

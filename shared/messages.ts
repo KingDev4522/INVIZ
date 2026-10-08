@@ -12,6 +12,7 @@ export const MESSAGE_TYPES: readonly string[] = [
   "VOICE_STATUS",
   "CAPTURE_LEVEL",
   "DIAG_CAPTURE",
+  "VOICE_DIAG",
   "USER_OVERRIDE",
   "FOCUS_CHANGED",
   "PAGE_STATE_UPDATED",
@@ -25,6 +26,7 @@ export const MESSAGE_TYPES: readonly string[] = [
   "ACTION_EXECUTE",
   "OBSERVE_VERIFY",
   "READ_TEXT",
+  "REQUEST_SNAPSHOT",
   "AGENT_ACTIVE",
   "ACTION_RESULT",
   "VERIFICATION_REQUEST",
@@ -86,8 +88,8 @@ export type SpeechLang = "en" | "hi";
 
 export const ERROR_SPEECH: Record<ErrorCode, Record<SpeechLang, string>> = {
   CANNOT_ACCESS_PAGE: {
-    en: "I can't access this page.",
-    hi: "मैं इस पेज तक नहीं पहुँच सकता।",
+    en: "I can't read the current page yet. Reload the page and try again.",
+    hi: "मैं यह पेज अभी पढ़ नहीं पा रहा। पेज reload करके दोबारा कोशिश करें।",
   },
   CANNOT_UNDERSTAND_PAGE: {
     en: "I couldn't understand this page.",

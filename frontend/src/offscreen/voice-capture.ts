@@ -175,7 +175,7 @@ function toCaptureError(err: unknown): VoiceCaptureError {
   }
   return new VoiceCaptureError(
     "denied",
-    "microphone permission denied or unavailable",
+    `microphone permission denied or unavailable (${name !== "" ? name : "unknown error"} — grant it in extension Options → Enable microphone)`,
   );
 }
 

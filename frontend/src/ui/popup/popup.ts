@@ -11,9 +11,35 @@ import {
 const statusEl = document.getElementById("status") as HTMLParagraphElement;
 const toggleEl = document.getElementById("toggle") as HTMLButtonElement;
 const captureEl = document.getElementById("capture") as HTMLButtonElement;
+const powerEl = document.getElementById("power") as HTMLButtonElement;
+const harnessEl = document.getElementById("harness") as HTMLButtonElement;
 const optionsLink = document.getElementById("options-link") as HTMLAnchorElement;
 
 const isHindi = (navigator.language || "en").toLowerCase().startsWith("hi");
+
+interface OperatorFlags {
+  voicelensEnabled?: boolean;
+  /** Trusted-operator mode: WebGuard safety gates bypassed (correctness BLOCKs stay). */
+  powerMode?: boolean;
+  /** Route execution through the external browser-harness host (safe local fallback). */
+  harnessEnabled?: boolean;
+}
+
+async function readFlags(): Promise<OperatorFlags> {
+  try {
+    const cfg = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
+    return ((cfg[STORAGE_KEY_CONFIG] as OperatorFlags | undefined) ?? {});
+  } catch {
+    return {};
+  }
+}
+
+async function writeFlags(patch: Partial<OperatorFlags>): Promise<void> {
+  const current = await readFlags();
+  await chrome.storage.local.set({
+    [STORAGE_KEY_CONFIG]: { ...current, ...patch },
+  });
+}
 
 const STR = {
   loading: isHindi ? "लोड हो रहा है…" : "Loading…",
@@ -72,13 +98,10 @@ async function credentialsPresent(): Promise<boolean> {
 
 async function render(): Promise<void> {
   statusEl.textContent = STR.loading;
-  const [credsOk, cfg] = await Promise.all([
-    credentialsPresent(),
-    chrome.storage.local.get(STORAGE_KEY_CONFIG),
-  ]);
-  const enabled =
-    ((cfg[STORAGE_KEY_CONFIG] as { voicelensEnabled?: boolean } | undefined)
-      ?.voicelensEnabled) === true;
+  const [credsOk, flags] = await Promise.all([credentialsPresent(), readFlags()]);
+  const enabled = flags.voicelensEnabled === true;
+  const power = flags.powerMode === true;
+  const harness = flags.harnessEnabled === true;
   if (!credsOk) {
     statusEl.textContent = STR.setupNeeded;
   } else {
@@ -102,6 +125,17 @@ async function render(): Promise<void> {
     // tabs permission edge: status without support line is still truthful.
   }
   toggleEl.textContent = enabled ? STR.disable : STR.enable;
+  powerEl.textContent = power
+    ? isHindi ? "पावर मोड बंद करें" : "Disable Power mode"
+    : isHindi ? "पावर मोड चालू करें" : "Enable Power mode";
+  harnessEl.textContent = harness
+    ? isHindi ? "हार्नेस बंद करें" : "Disable Harness exec"
+    : isHindi ? "हार्नेस चालू करें" : "Enable Harness exec";
+  if (power && !statusEl.textContent.includes("Power")) {
+    statusEl.textContent += isHindi
+      ? " पावर मोड चालू: पुष्टि नहीं माँगी जाएगी।"
+      : " Power mode on: no confirmations will be asked.";
+  }
   captureEl.textContent = STR.capture;
   // Voice capture needs the backend; without it the turn cannot transcribe.
   captureEl.disabled = false;
@@ -113,13 +147,24 @@ captureEl.addEventListener("click", () => {
 
 toggleEl.addEventListener("click", () => {
   void (async () => {
-    const cfg = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
-    const current =
-      ((cfg[STORAGE_KEY_CONFIG] as { voicelensEnabled?: boolean } | undefined)
-        ?.voicelensEnabled) === true;
-    await chrome.storage.local.set({
-      [STORAGE_KEY_CONFIG]: { voicelensEnabled: !current },
-    });
+    const current = await readFlags();
+    await writeFlags({ voicelensEnabled: current.voicelensEnabled !== true });
+    await render();
+  })();
+});
+
+powerEl.addEventListener("click", () => {
+  void (async () => {
+    const current = await readFlags();
+    await writeFlags({ powerMode: current.powerMode !== true });
+    await render();
+  })();
+});
+
+harnessEl.addEventListener("click", () => {
+  void (async () => {
+    const current = await readFlags();
+    await writeFlags({ harnessEnabled: current.harnessEnabled !== true });
     await render();
   })();
 });

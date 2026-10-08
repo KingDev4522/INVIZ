@@ -38,6 +38,19 @@ export interface ExternalExecuteContext {
   pageGeneration: number;
   /** Required: the bridge authorizes per task. */
   taskId: string;
+  /**
+   * Extension-side element grounding (role + name from the live snapshot).
+   * The eNN target id is meaningless outside the tab, so the host resolves
+   * this descriptor against the real accessibility tree instead. Absent for
+   * targetless actions (navigate, web_search, …).
+   */
+  node?: { role: string; name: string };
+  /**
+   * Page URL the extension acted on. The host drives the shared Chrome
+   * instance (its own tab handles), so it attaches to the tab with this URL
+   * before acting — never some other tab the user has open.
+   */
+  url?: string;
 }
 
 /** The optional external execution port the Execution Router selects. */
@@ -67,6 +80,7 @@ const ACTION_CAPABILITY: Readonly<Record<ActionType, BridgeCapability | null>> =
   go_forward: "go_forward",
   read: "read_region",
   web_search: null, // local-only: backend search, not a browser operation
+  browser_search: null, // local-only: chrome.search / tabs.update in SW context
   open_tab: null,
   close_tab: null,
 };
@@ -144,11 +158,13 @@ export class BrowserHarnessBridge implements ExternalExecutor {
       requestId: `bh_${ctx.taskId}_${this.counter}`,
       taskId: ctx.taskId,
       capability,
+      ...(ctx.url !== undefined ? { url: ctx.url } : {}),
       args: {
         ...(action.target !== undefined ? { target: action.target } : {}),
         ...(action.value !== undefined ? { value: action.value } : {}),
         ...(action.parameters !== undefined ? { parameters: action.parameters } : {}),
         ...(action.expect !== undefined ? { expect: action.expect } : {}),
+        ...(ctx.node !== undefined ? { node: { role: ctx.node.role, name: ctx.node.name } } : {}),
       },
       pageGeneration: ctx.pageGeneration,
     };

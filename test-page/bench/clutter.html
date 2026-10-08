@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bench C — Tile grid (spatial reference)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #1b1f24; }
+      h1 { font-size: 20px; }
+      .grid { display: grid; grid-template-columns: repeat(4, 120px); gap: 12px; margin: 16px 0 24px; }
+      .grid button { height: 72px; border-radius: 10px; border: 1px solid #d8dce1; background: #fff; font-size: 15px; cursor: pointer; }
+      /* Exactly ONE tile is visually distinct (gold) — same accessible name. */
+      .grid button.gold { background: #ffd666; border-color: #b58a00; font-weight: 700; }
+      .shuffle { background: #fff; border: 1px solid #d8dce1; border-radius: 8px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>Photo wall</h1>
+    <p>Twelve identical tiles. The DOM registry lists twelve indistinguishable `button "Tile"` lines in document order — it cannot say which one is gold or top-right.</p>
+    <!-- Document order: t1..t11, then the gold tile LAST (bottom-right in
+         DOM order is irrelevant; visually it sits top-right). -->
+    <div class="grid">
+      <button type="button" data-bench="t1">Tile</button>
+      <button type="button" data-bench="t2">Tile</button>
+      <button type="button" data-bench="t3">Tile</button>
+      <button type="button" class="gold" data-bench="tile-gold">Tile</button>
+      <button type="button" data-bench="t5">Tile</button>
+      <button type="button" data-bench="t6">Tile</button>
+      <button type="button" data-bench="t7">Tile</button>
+      <button type="button" data-bench="t8">Tile</button>
+      <button type="button" data-bench="t9">Tile</button>
+      <button type="button" data-bench="t10">Tile</button>
+      <button type="button" data-bench="t11">Tile</button>
+      <button type="button" data-bench="t12">Tile</button>
+    </div>
+    <button type="button" class="shuffle" data-bench="shuffle">Shuffle tiles</button>
+  </body>
+</html>

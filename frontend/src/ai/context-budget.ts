@@ -108,6 +108,19 @@ export function estimateTokens(text: string): number {
   return Math.ceil((text.length / 4) * 1.15);
 }
 
+/**
+ * Coarse image-token comparator for the sparse vision fallback (P0-1).
+ *
+ * This is NOT a provider measurement — no image-token count has been proven
+ * against Ollama/Groq here. It exists so a screenshot step can log image cost
+ * next to text cost in the same coarse unit: ~1k tokens per megapixel
+ * (1024x1024 ≈ 1024). Treat every logged value as budget-comparison only.
+ */
+export function estimateImageTokens(width: number, height: number): number {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return 0;
+  return Math.ceil((width * height) / 1024);
+}
+
 function formatItem(item: BudgetItem): string {
   const stateEntries = Object.entries(item.states)
     .map(([k, v]) => `${k}=${String(v)}`)
@@ -161,7 +174,21 @@ export function serializePage(
   // Counted from the folded list, not the raw one: otherwise items removed by
   // dedupe are reported as "capped" as well and the cut log double-counts them.
   const cappedItems = Math.max(0, dedupedAll.length - MAX_ELEMENT_CANDIDATES);
-  const deduped = dedupedAll.slice(0, MAX_ELEMENT_CANDIDATES);
+  // Generic head+tail preservation: document order puts persistent
+  // header/nav first and main content last, so a pure prefix cut always
+  // starves the tail (media grids, main actions) on large pages. Keeping a
+  // head segment (focused/toggle/field priorities live there) plus a tail
+  // segment keeps both chrome AND content groundable within the same budget.
+  // Relative order within each segment is preserved, so ordinal references
+  // ("first", "Nth") stay stable. No site-specific ranking involved.
+  const HEAD_KEEP = 20;
+  const deduped =
+    dedupedAll.length <= MAX_ELEMENT_CANDIDATES
+      ? dedupedAll
+      : [
+          ...dedupedAll.slice(0, HEAD_KEEP),
+          ...dedupedAll.slice(dedupedAll.length - (MAX_ELEMENT_CANDIDATES - HEAD_KEEP)),
+        ];
   const budgeted = deduped.map((d) => d.item);
   const dedupedItems = deduped.reduce((sum, d) => sum + d.identical, 0);
 

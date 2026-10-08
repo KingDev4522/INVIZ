@@ -81,6 +81,46 @@ describe("WebGuard", () => {
     expect(evaluate(type, ctx({ sensitiveAuthorized: true })).decision).toBe("ALLOW");
   });
 
+  it("power mode allows consequential actions without confirmation", () => {
+    const power = ctx({ powerMode: true });
+    expect(
+      evaluate({ action: "click", target: "e2", pageGeneration: 42 }, power),
+    ).toEqual({ decision: "ALLOW", reason: "within policy (power mode: safety gates bypassed)" });
+    expect(
+      evaluate({ action: "click", target: "e3", pageGeneration: 42 }, power).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("power mode allows sensitive typing without the slot-fill path", () => {
+    const type = {
+      action: "type" as const,
+      target: "e5",
+      pageGeneration: 42,
+      value: "s3cr3t",
+      expect: { type: "field_value_present" as const, target: "e5" },
+    };
+    expect(evaluate(type, ctx({ powerMode: true })).decision).toBe("ALLOW");
+  });
+
+  it("power mode keeps correctness BLOCKs (schema, targets, provenance)", () => {
+    const power = ctx({ powerMode: true });
+    expect(
+      evaluate({ action: "click", target: "e99", pageGeneration: 42 }, power).decision,
+    ).toBe("BLOCK");
+    expect(
+      evaluate(
+        { action: "execute_javascript" as unknown as "click", target: "e1" },
+        power,
+      ).decision,
+    ).toBe("BLOCK");
+    expect(
+      evaluate(
+        { action: "click", target: "e1", pageGeneration: 42 },
+        ctx({ powerMode: true, provenance: "PAGE" as unknown as GuardContext["provenance"] }),
+      ).decision,
+    ).toBe("BLOCK");
+  });
+
   it("rejects malformed and dangerous actions at the schema gate", () => {
     expect(
       evaluate({ action: "click", target: "nope", pageGeneration: 42 }, ctx()).decision,

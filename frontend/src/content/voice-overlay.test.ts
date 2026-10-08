@@ -42,6 +42,45 @@ describe("voice overlay", () => {
     expect(shown()?.style.display).toBe("none");
   });
 
+  it("shows agent thinking as the prominent headline, not footnote detail", () => {
+    const overlay = new VoiceOverlay(document);
+    overlay.showStatus("thinking", "Reasoning… (step 3)");
+    expect(overlay.currentPhase()).toBe("thinking");
+    expect(overlay.currentHeadline()).toBe("Reasoning… (step 3)");
+    expect(overlay.currentDetail()).toBe("");
+    overlay.showStatus("thinking", "Searching the web…");
+    expect(overlay.currentHeadline()).toBe("Searching the web…");
+    overlay.hide();
+  });
+
+  it("keeps transcripts and questions as detail under their phase headline", () => {
+    const overlay = new VoiceOverlay(document);
+    overlay.showStatus("transcript", "open the first result");
+    expect(overlay.currentHeadline()).toContain("transcribing");
+    expect(overlay.currentDetail()).toBe("open the first result");
+    overlay.showStatus("awaiting", "Which size?");
+    expect(overlay.currentHeadline()).toContain("Waiting");
+    expect(overlay.currentDetail()).toBe("Which size?");
+    overlay.hide();
+  });
+
+  it("falls back to the generic headline when thinking text is absent", () => {
+    const overlay = new VoiceOverlay(document);
+    overlay.showStatus("thinking");
+    expect(overlay.currentHeadline()).toContain("Thinking");
+    overlay.hide();
+  });
+
+  it("confirm No restores live thinking headline instead of the generic one", () => {
+    const overlay = new VoiceOverlay(document, { onStop: () => undefined });
+    overlay.showStatus("thinking", "Reasoning… (step 3)");
+    overlay.requestStop();
+    expect(overlay.currentHeadline()).toBe("Cancel this turn?");
+    overlay.pressConfirm(false);
+    expect(overlay.currentHeadline()).toBe("Reasoning… (step 3)");
+    overlay.hide();
+  });
+
   it("shows transcript detail text and clears it when absent", () => {
     const overlay = new VoiceOverlay(document);
     overlay.show("transcript", { detail: "open the first result" });
@@ -67,6 +106,59 @@ describe("voice overlay", () => {
     expect(overlay.currentDetail()).toContain("rate limit");
     overlay.show("busy", { detail: "Already listening…" });
     expect(overlay.currentHeadline()).toContain("Already listening");
+    overlay.hide();
+  });
+
+  it("exposes a visible Stop control during active phases that fires onStop", () => {
+    let stops = 0;
+    const overlay = new VoiceOverlay(document, { onStop: () => { stops += 1; } });
+    for (const phase of ["listening", "transcribing", "thinking", "speaking", "awaiting"] as const) {
+      overlay.show(phase);
+      expect(overlay.stopControlVisible()).toBe(true);
+    }
+    overlay.hide();
+  });
+
+  it("Stop press/hover asks 'Cancel this turn?' instead of acting immediately", () => {
+    const overlay = new VoiceOverlay(document, { onStop: () => undefined });
+    overlay.show("speaking");
+    expect(overlay.confirmVisible()).toBe(false);
+    overlay.pressStop(); // click path
+    expect(overlay.confirmVisible()).toBe(true);
+    expect(overlay.currentHeadline()).toBe("Cancel this turn?");
+    overlay.hide();
+  });
+
+  it("confirm Yes fires onStop and hides instantly; No resumes display", () => {
+    let stops = 0;
+    const overlay = new VoiceOverlay(document, { onStop: () => { stops += 1; } });
+    overlay.show("speaking");
+    overlay.requestStop(); // hover path (same convergence as click)
+    expect(overlay.confirmVisible()).toBe(true);
+    overlay.pressConfirm(false);
+    expect(stops).toBe(0);
+    expect(overlay.confirmVisible()).toBe(false);
+    expect(overlay.currentHeadline()).toContain("Speaking");
+    overlay.requestStop();
+    overlay.pressConfirm(true);
+    expect(stops).toBe(1);
+    expect(overlay.currentPhase()).toBeNull(); // hidden at once — never looks laggy
+  });
+
+  it("terminal phases settle a pending cancel question", () => {
+    const overlay = new VoiceOverlay(document, { onStop: () => undefined });
+    overlay.show("thinking");
+    overlay.requestStop();
+    expect(overlay.confirmVisible()).toBe(true);
+    overlay.show("done");
+    expect(overlay.confirmVisible()).toBe(false);
+    overlay.hide();
+  });
+
+  it("pressStop never throws, even with a throwing handler", () => {
+    const overlay = new VoiceOverlay(document, { onStop: () => { throw new Error("x"); } });
+    overlay.show("speaking");
+    expect(() => overlay.pressStop()).not.toThrow();
     overlay.hide();
   });
 

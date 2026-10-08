@@ -188,7 +188,11 @@ describe("Execution Router — default is LOCAL", () => {
     expect(h.bridgeRequests.length).toBe(1);
     expect(h.localExecuted).toEqual([]); // genuinely external
     expect(h.current()?.status).toBe("COMPLETE");
-    // Minimum data: only protocol/request/task/capability/args/generation.
+    // Explicit contract: protocol/request/task/capability/args/generation
+    // plus page URL (host attaches to the SAME tab in shared Chrome) — still
+    // no goal text, secrets, or policy. The element descriptor travels inside
+    // args.node (role+name for AX grounding); the host drives the same browser
+    // over CDP and can already observe the page, so this adds no visibility.
     expect(h.bridgeRequests[0]?.keys).toEqual([
       "args",
       "capability",
@@ -196,6 +200,7 @@ describe("Execution Router — default is LOCAL", () => {
       "protocolVersion",
       "requestId",
       "taskId",
+      "url",
     ]);
     expect(h.bridgeRequests[0]?.capability).toBe("click");
   });

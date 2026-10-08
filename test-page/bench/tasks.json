@@ -1,0 +1,77 @@
+{
+  "$comment": "HYBRID VISION BENCHMARK task set (Phase 9/10). expectBench is a data-bench marker resolved to the real eNN id at runtime via ContextLens.identify() — never hardcoded, so registry numbering changes cannot silently invalidate ground truth. Categories: visual-* tasks need the screenshot; dom-favorable tasks must not regress under hybrid.",
+  "pages": [
+    {
+      "file": "visual.html",
+      "shot": "visual.png",
+      "tasks": [
+        {
+          "id": "V1",
+          "prompt": "Click the toolbar button with the trash-can icon.",
+          "expectBench": "trash",
+          "category": "visual-only"
+        },
+        {
+          "id": "V2",
+          "prompt": "Click the Export report button.",
+          "expectBench": "export",
+          "category": "dom-favorable"
+        },
+        {
+          "id": "V3",
+          "prompt": "Click the toolbar button with the star icon.",
+          "expectBench": "star",
+          "category": "visual-only"
+        }
+      ]
+    },
+    {
+      "file": "ambiguous.html",
+      "shot": "ambiguous.png",
+      "tasks": [
+        {
+          "id": "A1",
+          "prompt": "Click the Select button on the highlighted green Most popular plan.",
+          "expectBench": "select-popular",
+          "category": "visual-duplicate"
+        },
+        {
+          "id": "A2",
+          "prompt": "Click the Read more link under the Customer stories section.",
+          "expectBench": "stories-more",
+          "category": "visual-duplicate"
+        },
+        {
+          "id": "A3",
+          "prompt": "Click the Select button on the Starter plan.",
+          "expectBench": "select-starter",
+          "category": "dedupe-representative"
+        }
+      ]
+    },
+    {
+      "file": "clutter.html",
+      "shot": "clutter.png",
+      "tasks": [
+        {
+          "id": "C1",
+          "prompt": "Click the gold tile in the top-right corner of the grid.",
+          "expectBench": "tile-gold",
+          "category": "visual-spatial"
+        },
+        {
+          "id": "C2",
+          "prompt": "Click the Shuffle tiles button.",
+          "expectBench": "shuffle",
+          "category": "dom-favorable"
+        },
+        {
+          "id": "C3",
+          "prompt": "Click the first Tile in the grid.",
+          "expectBench": "t1",
+          "category": "ordinal"
+        }
+      ]
+    }
+  ]
+}

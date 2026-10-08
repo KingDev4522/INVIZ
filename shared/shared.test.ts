@@ -252,10 +252,10 @@ describe("bilingual error catalog", () => {
 
   it("serves the exact inaccessible-page strings", () => {
     expect(getErrorSpeech("CANNOT_ACCESS_PAGE", "en")).toBe(
-      "I can't access this page.",
+      "I can't read the current page yet. Reload the page and try again.",
     );
     expect(getErrorSpeech("CANNOT_ACCESS_PAGE", "hi")).toBe(
-      "मैं इस पेज तक नहीं पहुँच सकता।",
+      "मैं यह पेज अभी पढ़ नहीं पा रहा। पेज reload करके दोबारा कोशिश करें।",
     );
   });
 });

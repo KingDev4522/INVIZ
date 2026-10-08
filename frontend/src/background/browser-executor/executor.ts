@@ -33,6 +33,18 @@ function result(
   };
 }
 
+/**
+ * Builds the fallback search-navigation URL for browser_search.
+ * Used ONLY when the chrome.search API (default-engine search) is
+ * unavailable: the executor — never the model — owns URL construction,
+ * so the NEVER-invent-URLs rule stays intact. Generic: no site-specific
+ * selectors, no page scraping (PRD 6.10 §6/G6).
+ * Exported for unit tests.
+ */
+export function buildBrowserSearchUrl(query: string): string {
+  return `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`;
+}
+
 async function executeL1(
   action: StructuredAction,
   ctx: ExecuteContext,
@@ -44,6 +56,33 @@ async function executeL1(
         return result("failed", action, ctx, "SCHEMA_VALIDATION_FAILED");
       }
       await chrome.tabs.update(ctx.tabId, { url: params.url });
+      return result("executed", action, ctx);
+    }
+    case "browser_search": {
+      // PRD 6.10 §8: safest supported MV3 mechanism for browser-level search.
+      // Preferred: chrome.search.query uses the user's configured DEFAULT
+      // search engine in the CURRENT tab (no engine assumed, no omnibox hack
+      // from a content script, no fake API). Fallback: tabs.update to a
+      // search-results URL — same observable outcome (browser shows results).
+      const params = action.parameters as { query?: unknown } | undefined;
+      if (typeof params?.query !== "string" || params.query.trim() === "") {
+        return result("failed", action, ctx, "SCHEMA_VALIDATION_FAILED");
+      }
+      const query = params.query.trim();
+      try {
+        const searchApi = (
+          chrome as unknown as {
+            search?: { query?: (opts: { text: string; disposition?: string }) => Promise<void> | void };
+          }
+        ).search;
+        if (typeof searchApi?.query === "function") {
+          await searchApi.query({ text: query, disposition: "CURRENT_TAB" });
+          return result("executed", action, ctx);
+        }
+      } catch {
+        // Fall through to tabs.update fallback below.
+      }
+      await chrome.tabs.update(ctx.tabId, { url: buildBrowserSearchUrl(query) });
       return result("executed", action, ctx);
     }
     case "go_back":
@@ -106,7 +145,7 @@ async function executeL2(
   return result("executed", action, ctx);
 }
 
-const L1_ACTIONS = ["navigate", "go_back", "go_forward", "open_tab", "close_tab"];
+const L1_ACTIONS = ["navigate", "go_back", "go_forward", "open_tab", "close_tab", "browser_search"];
 
 /** Executes an approved action. Approval is WebGuard's job, not this one's. */
 export async function execute(

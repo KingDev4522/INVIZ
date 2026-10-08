@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bench V — Icon toolbar (visual-only cues)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #1b1f24; }
+      header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+      h1 { font-size: 20px; margin: 0; }
+      .toolbar { display: flex; gap: 8px; background: #fff; border: 1px solid #d8dce1; border-radius: 10px; padding: 8px; width: max-content; }
+      .toolbar button { width: 44px; height: 44px; border: 1px solid transparent; border-radius: 8px; background: #fff; cursor: pointer; display: grid; place-items: center; padding: 0; }
+      .toolbar button:hover { background: #eef1f4; }
+      .toolbar button.danger { background: #ffe9e7; border-color: #f5c2c0; }
+      .toolbar svg { width: 22px; height: 22px; stroke: #3b4148; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .toolbar button.danger svg { stroke: #b3261e; }
+      main p { max-width: 60ch; }
+      .export { margin-top: 16px; background: #1463ff; border: 1px solid #1463ff; color: #fff; border-radius: 8px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <header><h1>Projects</h1></header>
+    <!-- Icon-only toolbar: the three buttons carry NO accessible name
+         (bare SVG, no aria-label/title/text), so the DOM registry lists three
+         identical `button ""` lines. Only the screenshot distinguishes them. -->
+    <div class="toolbar" role="toolbar" aria-label="Project actions">
+      <button type="button" data-bench="star"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6-5.4-3-5.4 3 1.1-6L3.2 9.4l6.1-.8z"/></svg></button>
+      <button type="button" class="danger" data-bench="trash"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2m-8 0l1 13h8l1-13"/></svg></button>
+      <button type="button" data-bench="gear"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9l2.1 2.1m10 10l2.1 2.1m0-14.2l-2.1 2.1m-10 10l-2.1 2.1"/></svg></button>
+    </div>
+    <main>
+      <p>Three projects are listed below. Use the toolbar above to star, delete, or configure the selected project.</p>
+      <button type="button" class="export" data-bench="export">Export report</button>
+    </main>
+  </body>
+</html>
