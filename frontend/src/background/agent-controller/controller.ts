@@ -1417,16 +1417,32 @@ export class AgentController {
       return;
     }
 
-    // Free-will reasoning: no deterministic first-step bypasses.
-    // The model always reasons first from a fresh snapshot and decides itself
-    // whether to interact with the page, browser_search, web_search, navigate,
-    // or answer. Former hardcoded shortcuts (open-site allowlist navigation,
-    // site-anchor navigation, deterministic browser_search, article fast-path,
+    // Free-will reasoning: the model decides itself whether to interact with
+    // the page, browser_search, web_search, navigate, or answer — with ONE
+    // narrow exception below. Former hardcoded shortcuts (open-site allowlist
+    // navigation, site-anchor navigation, deterministic browser_search,
     // page-search hints) are intentionally NOT executed here — they remain as
     // exported pure helpers for advisory/telemetry use only, never as gates.
     // Safety (WebGuard, schema validation, budgets, verification) still runs
     // on whatever the model emits; anti-hallucination grounding (observed URLs
     // and registry ids) is enforced downstream, not by task hardcoding.
+    //
+    // Exception — article open fast-path: "open the latest news article of
+    // India" style goals are search→open by nature (no page interaction can
+    // satisfy them), and the small local model fumbles them. Detection and the
+    // query are fully generic (verbs + the word "article"; the topic always
+    // comes from the user's own words, never a fixed title or URL), the
+    // destination is the best observed search result (never invented), and it
+    // still runs the trusted WebGuard → executor → verification path.
+    if (task.currentStep === 0 && task.lastVerifiedResult === null) {
+      if (isArticleOpenGoal(task.goal)) {
+        const articleQuery = extractArticleQuery(task.goal);
+        if (articleQuery !== "") {
+          await this.doArticleFastPath(task, tabId, store, articleQuery);
+          return;
+        }
+      }
+    }
 
     // CURRENT-PAGE acquisition: the already-open tab IS the context. Never
     // require a prior navigate / "open X" — pull fresh when storage is
@@ -1983,6 +1999,127 @@ export class AgentController {
       store,
       { sensitiveAuthorized: false, confirmed: false },
     );
+  }
+
+  /**
+   * Article search-to-open fast-path ("open the latest news article of India"
+   * → web_search + immediate navigate, no reasoning turns). The query is
+   * generic-extracted from the goal (never a fixed topic), the destination is
+   * the best observed search result preferring ARTICLE/NEWS types (never an
+   * invented URL — it is remembered as observed before navigating, so the
+   * grounding check passes), and execution runs the trusted WebGuard →
+   * executor → verification path. Finishes COMPLETE right after verified
+   * navigation.
+   */
+  private async doArticleFastPath(
+    task: TaskSnapshot,
+    tabId: number,
+    store: NonNullable<ControllerDeps["store"]>,
+    query: string,
+  ): Promise<void> {
+    const backend = this.deps.backend;
+    const speak = this.deps.speak ?? (async () => undefined);
+    if (backend === undefined) {
+      await this.finish(task, "FAILED", "AI_SERVICE_UNAVAILABLE", tabId, store);
+      return;
+    }
+    const normalized = normalizeSearchQuery(query);
+    const searchedQueries = task.searchedQueries ?? [];
+    const searchesSpent = task.searchCount ?? 0;
+    if (normalized === "") {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult = "article search refused: empty query";
+      await store.save(task);
+      return;
+    }
+    if (searchedQueries.includes(normalized) || searchesSpent >= MAX_SEARCHES_PER_TASK) {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult =
+        "article search refused: search budget spent — answer from earlier observations";
+      await store.save(task);
+      return;
+    }
+    task.searchCount = searchesSpent + 1;
+    task.searchedQueries = [...searchedQueries, normalized];
+    task.searchMode = "web_research";
+    task.searchStrategies = selectSearchStrategies(task.goal, "web_research");
+    const turnId = this.taskTurns.get(task.taskId);
+    this.emitProgress({ taskId: task.taskId, kind: "searching" });
+    const search = this.deps.search ?? ((input) => this.searchViaBackend(input, backend));
+    let results: SearchResultItem[];
+    try {
+      const out = await search({
+        query,
+        maxResults: 5,
+        ...(turnId !== undefined ? { turnId } : {}),
+      });
+      results = out.results;
+    } catch (err) {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult = "article search failed";
+      await store.save(task);
+      logger.warn("agent: article fast-path search failed", {
+        taskId: task.taskId,
+        ...(turnId !== undefined ? { turnId } : {}),
+        ...(err instanceof Error ? { reason: err.message } : {}),
+      });
+      return;
+    }
+    if (results.length === 0) {
+      task.lastVerifiedResult = `article search for "${query}" returned no results`;
+      await store.save(task);
+      await speak(
+        task.goalLang === "hi" ? "वेब पर कुछ नहीं मिला।" : "Nothing on the web for that.",
+        task.goalLang,
+        3,
+      );
+      await this.finish(task, "FAILED", null, tabId, store);
+      return;
+    }
+    // Best observed result, preferring ARTICLE/NEWS types. Generic scoring
+    // only — no domains, no topics.
+    let best = results[0] as SearchResultItem;
+    let bestScore = -1;
+    for (const r of results) {
+      const t = classifyResultType({
+        title: r.title,
+        url: r.url,
+        domain: domainOf(r.url),
+        surroundingText: r.snippet,
+      });
+      const score = t === "ARTICLE" ? 3 : t === "NEWS" ? 2 : 1;
+      if (score > bestScore) {
+        bestScore = score;
+        best = r;
+      }
+    }
+    this.rememberObservedUrls(task.taskId, [best.url]);
+    const dummySnapshot: PageSnapshotLike = {
+      url: "about:blank",
+      title: "",
+      generation: 0,
+      items: [],
+    };
+    await this.doAction(
+      {
+        action: "navigate",
+        parameters: { url: best.url },
+        expect: { type: "navigation_completed" },
+      },
+      task,
+      dummySnapshot,
+      tabId,
+      store,
+      { sensitiveAuthorized: false, confirmed: false },
+    );
+    const latest = await store.load();
+    if (latest === null || latest.taskId !== task.taskId) return;
+    if (isTerminal(latest.status)) return;
+    task.lastVerifiedResult = `article opened: ${best.title} — ${best.url}`;
+    await store.save(task);
+    this.emitProgress({ taskId: task.taskId, kind: "speaking", prompt: best.title });
+    await speak(shortTitle(best.title), task.goalLang, 4);
+    await this.finish(task, "COMPLETE", null, tabId, store);
   }
 
   // -- Outcome dispatch ----------------------------------------------------------
