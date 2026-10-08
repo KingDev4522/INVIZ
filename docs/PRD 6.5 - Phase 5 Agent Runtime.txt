@@ -1,0 +1,62 @@
+# PRD 6.5 — Phase 5: Agent Runtime
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.5 — Phase 5 Implementation (Agent Runtime)
+**Parent:** PRD 6 (master build contract, especially §§5–8). This document is normative for Phase 5.
+**Objective:** The full loop — understand, reason, ask/act, observe, verify, repeat — running against live pages with live models, deterministic safety in the middle, and the human holding an always-working stop switch. This is the largest phase; it is also where every shortcut would become a safety defect, so none are taken.
+
+> No simulation anywhere in this phase. Recovery is tested by breaking the *page* (fixture controls that fail on demand), never by faking the *model*.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.4 exit green (gateway, Qwen client, enrichment, Q&A/find flows live).
+- `test-page/` extended with: fail-once button (first click no-ops), slow dialog (opens after 2s), multi-page form flow (2 pages), sensitive-field form (password + OTP).
+
+## 1. WORK ITEMS
+
+### 1.1 Agent Controller state machine — REAL (PRD 3 §16–17; PRD 4 §52–55)
+
+`src/background/agent-controller/*`: IDLE → UNDERSTANDING → ANSWER | ASK_USER | ACT → (PROPOSED_ACTION → WEBGUARD → ALLOW/CONFIRM/BLOCK) → EXECUTING → OBSERVING → VERIFYING → CONTINUE/RECOVERY → COMPLETE, plus CANCELLED / BLOCKED / FAILED / LIMIT_REACHED. Every transition persists TaskState to `chrome.storage.session` **before** the side effect (crash-safe: a killed worker resumes by re-observing, never by assuming). Budgets from PRD 6 §4.4 enforced at the transition layer (25 actions, 3 recoveries/action, 30 Qwen calls, 600s wall-clock). Startup rule: any carried-over non-IDLE TaskState from a previous run → `CANCELLED (restart)` + announcement (fail closed, PRD 6 §4.6).
+
+### 1.2 WebGuard policy engine — REAL, deterministic, no model inside (PRD 4 §40–42; PRD 5 §8–15; PRD 6 §5)
+
+Single synchronous pipeline, fixed order: schema validation → action-type allowlist → target existence in current generation → generation freshness (TOCTOU pre-check) → field-type/sensitivity classification → confirmation classification → per-action parameter rules (PRD 6 §5 table, implemented as code-level schemas, not documentation) → provenance check → verdict ALLOW / BLOCK / REQUIRE_CONFIRMATION.
+Verdicts carry machine-readable reasons (`STALE_TARGET`, `CONFIRMATION_REQUIRED`, `SCHEMA_VALIDATION_FAILED`, …). BLOCKED actions speak the honest message (PRD 2 §23) and log metadata only. A future classifier (e.g. Prompt Guard) may be added later as an *advisory* input — this document forbids it from ever flipping BLOCK→ALLOW or skipping confirmation.
+
+### 1.3 Browser Executor L1+L2 — REAL (PRD 4 §44–45, §77–78)
+
+- L1 (service worker, Chrome APIs): navigate/go_back/go_forward/open_tab/close_tab via `chrome.tabs` — URL policy from PRD 6 §5 enforced before the call.
+- L2 (content script, DOM): click/type/focus/select/scroll/press_key/read via resolved live elements — the service worker sends element *references by (generation, id)*; the content script re-resolves against the live registry at execution instant (second TOCTOU guard) and refuses stale/missing targets even if WebGuard approved milliseconds earlier.
+- `execute()` returns `ExecutionResult{status: executed|failed, …}` — explicitly not success. Trusted synthetic input events only (`isTrusted`-compatible dispatch); the executor never synthesizes *user-activation-gated* gestures (file pickers — manual handoff per PRD 6 §5 upload policy).
+
+### 1.4 Verification Engine — REAL (PRD 4 §47–49; PRD 3 §23–24; PRD 6 §5)
+
+Evaluates the action's `expect` (all PRD 4 §99 types + `element_state`) by poll/observe loop until result / `timeout_ms` / cancel / generation-change. Outcomes VERIFIED_SUCCESS / VERIFIED_FAILURE / STALE_STATE / UNKNOWN; only VERIFIED_SUCCESS advances the task. Recovery: re-observe current state → Qwen reassesses from the *new* state → new action (max 3 attempts, never the identical failed action twice without an intervening state change — enforced by comparing `(action,target,generation)` triples).
+
+### 1.5 Ask-user loop + confirmation — REAL (PRD 6 §§6–7; PRD 3 §53–55)
+
+- `WAITING_FOR_USER_ANSWER`: next transcript slot-fills the pending question deterministically; ambiguity → `WAITING_FOR_CLARIFICATION` re-ask (PRD 2 §14); 90s TTL fail-closed (question cancelled, task preserved, user told).
+- Sensitive fields: transcript→field binding bypasses Qwen entirely; value travels the memory-only envelope (§6): controller → WebGuard (validates everything *except* logging the value) → executor → DOM → envelope zeroed. Verification by non-emptiness, never by echo.
+- `WAITING_FOR_CONFIRMATION`: consequence speech from fixed EN/HI templates → deterministic YES/NO match (PRD 6 §3.3 sets, both scripts) → execute / reject; double non-match → reject + pause; 90s TTL → reject. Qwen is not in this path — including paraphrase.
+
+### 1.6 Cancellation + human-wins — REAL (PRD 6 §8; PRD 4 §54–55)
+
+Voice ("stop", "cancel", "रुको", "रद्द करो"), shortcut, popup button: all funnel to `CANCEL_TASK`, which (a) halts the controller, (b) clears queued agent speech via the Phase 2 STOP path, (c) preserves partial TaskState, (d) announces "Task cancelled. / कार्य रद्द किया गया।", (e) returns to IDLE. Content-script trusted-input listeners (`isTrusted` keydown/click/wheel during agent states) trigger `PAUSED_USER_OVERRIDE`: halt, re-observe generation, announce, await `resume` (reasons from new state; stale pendings discarded) or new instruction.
+
+### 1.7 Read/paging flow — REAL (PRD 2 §24–25; PRD 4 §69; PRD 6 §5 `read`)
+
+Region read (target element or selection) → DOM text → minimization (requested region only) → chunked TTS with position tracking → `continue` resumes from offset, `stop reading` halts, `repeat` replays last chunk. Read is verification-exempt (no state change) but logged; 20,000-char cap per request with continuation offered, never silent truncation.
+
+## 2. EXIT CRITERIA (ALL REQUIRED, LIVE EVERYTHING, EN + HI)
+
+1. Multi-step flow (search → open first result → verify landing): passes 5/5 on `test-page/` + 1 real site, both languages.
+2. Form-fill with 3 ask-user turns including 1 sensitive field: values land correctly; canary audit proves the secret touched only memory (heap/grep audit over storage, logs, cache, transcripts).
+3. Confirmation flow: submit action → consequence speech → YES executes + verifies; NO rejects; silence×90s rejects (clock-tested, not waited out — TTL injected at 5s in test build only via config, never via fake responses).
+4. Cancellation: voice STOP mid-3-step-task halts audio and actions within 1s; partial state preserved and reported; resume works from new state.
+5. Recovery: fail-once control forces VERIFIED_FAILURE → reassessment → success on retry; slow dialog verifies within timeout; triple-fail control ends in honest FAILED speech, never a loop.
+6. Adversarial suites: stale-target (100%), parameter-violation incl. `javascript:` URL + Ctrl+T keypress (100% rejected), budget-exceeded paths announce correctly.
+7. Human-wins: scripted user Tab/click mid-execution pauses the agent; resume completes from the new state; no stale action ever executes post-override.
+
+*End of PRD 6.5 v1.0.*

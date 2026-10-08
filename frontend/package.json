@@ -1,0 +1,22 @@
+{
+  "name": "inviz-frontend",
+  "version": "0.0.2",
+  "description": "INVIZ browser extension (Chrome MV3, TypeScript). No provider keys here — all AI traffic goes through the backend contract.",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/chrome": "^0.3.4",
+    "happy-dom": "^20.14.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "dependencies": {
+    "thinking-orbs": "^0.3.2"
+  }
+}

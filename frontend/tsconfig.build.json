@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "..",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts", "../shared/**/*.test.ts", "site-qualification.test.ts"]
+}

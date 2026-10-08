@@ -1,0 +1,62 @@
+# PRD 6.4 — Phase 4: AI Gateway & Qwen Reasoning
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.4 — Phase 4 Implementation (AI Gateway & Qwen Reasoning)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 4.
+**Objective:** A single hardened gateway to live Groq services, a disciplined Qwen client, and page understanding that answers questions about the real page — with every reasoning step budgeted, validated, and honestly attributed. The model is consulted; it is never trusted.
+
+> Credential: C1/C3 already gated at Phase 3. This phase adds the fallback-model path (C3) and the full gateway discipline (pool, backoff, budgets).
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.3 exit green (live transcription flowing with `{text, lang}` tags).
+- C3 (fallback model `qwen/qwen3-32b`) provisioned and smoke-tested.
+
+## 1. WORK ITEMS
+
+### 1.1 AI Gateway — REAL (PRD 4 §30–34, §89)
+
+- `src/background/ai-gateway/*`: one OpenAI-compatible HTTP client for all Groq traffic (chat + transcriptions share base URL, key pool, retry, and error normalization — the consolidation the architecture intends).
+- **Key pool:** 1..N keys, round-robin with per-key health (consecutive-failure quarantine, 60s cool-down, automatic re-admission on success). 429 → exponential backoff with jitter, bounded at 3 retries; auth failure → key quarantined permanently for the session + spoken `AI_SERVICE_UNAVAILABLE` path. Retries are never infinite (PRD 4 §89).
+- **Error normalization:** every provider failure maps to the PRD 4 §62 vocabulary (`AI_SERVICE_UNAVAILABLE`, `TRANSCRIPTION_FAILED`, rate-limit surfaced as service-unavailable with retry advice). Raw provider payloads never leave the gateway.
+- Gateway exposes `chatStructured()`, `transcribe()` only. ContextLens, VoiceLens, Controller, WebGuard hold no HTTP code and no provider strings.
+
+### 1.2 Qwen client — REAL, constrained (PRD 4 §21–25, §90–91; PRD 6 §4.5)
+
+- Pinned `qwen/qwen3.8-27b`; fallback `qwen/qwen3-32b` on model-error/429-exhaustion (switch logged as metadata; user never hears about it unless both fail).
+- Interactive calls: `reasoning_effort: "none"`, JSON mode (`response_format: json_object`), `max_completion_tokens` 2,000. Enrichment calls (async only): `low`/`medium`, 8,000 cap; `high` behind config flag, never default.
+- Output-contract validation (PRD 4 §25): response must parse to exactly one of ANSWER / ASK_USER / PROPOSE_ACTION / REQUEST_CONFIRMATION / TASK_COMPLETE / CANNOT_PROCEED with its required fields. Malformed, extra-action smuggling (natural-language text containing a second action), unknown action types, invented element IDs, or JavaScript-looking payloads → rejected as model-response failure → `AI_SERVICE_UNAVAILABLE` behavior (deterministic mode), never "best-effort interpretation." A recorded-real-response regression corpus (labeled, import-restricted) guards the validator — it tests the *validator*, it never feeds the runtime.
+
+### 1.3 Context budgeting serializer — REAL (PRD 6 §4.5; PRD 5 §33–34)
+
+- 10,000-token hard cap per call measured with the gateway's tokenizer estimate (conservative 4 chars/token + 15% margin). Priority: focused element → task-relevant form → headings/landmarks → visible interactive candidates (cap 120, forms first) → visible text (truncated). Over-budget cuts from the tail; every cut logged `{cutChars, cutSection}` metadata.
+- Sensitive-field values and Category C content are excluded at serialization time (serializer receives field-class metadata from the Phase 1 registry and drops values for sensitive types — exclusion is structural, not prompt-based).
+- Every Qwen input carries provenance tags per string (PRD 5 §17–18; full tagging audit lands in PRD 6.6, but the fields exist from this phase).
+
+### 1.4 Enrichment pipeline — REAL, async, non-blocking (PRD 3 §12, §30; PRD 4 §16)
+
+- Activation-time Layer B build runs **after** Layer A is usable; timing instrumentation proves first focus announcement never waits for it (asserted in exit test with a slow-network throttle).
+- Selective re-analysis on the PRD 6.1 trigger set only; Layer B freshness TTL 90s — stale or empty Layer B is excluded from reasoning input (the call proceeds on Layer A alone and notes the exclusion in logs).
+- Layer B entries store `{ interpretation, pageGeneration, producedAt, provenance: MODEL_INFERENCE }` — never trusted, never authorizing (enforcement in PRD 6.5/6.6; the data shape is correct from birth).
+
+### 1.5 Bilingual system prompt — REAL (PRD 6 §3)
+
+System prompt mandates: mirror the user's language (from transcript `lang` tag); structured-output discipline (schema-first instruction + one in-language example per outcome class, examples frozen in `src/ai/prompts/` and versioned); element-ID grounding (targets must be quoted from the provided registry — any other ID is a failure, and the prompt says so); sensitive-field rule (if the task needs a secret, emit ASK_USER with `sensitivity: high` and stop — never solicit the value into reasoning context; the memory-only path in PRD 6.5 handles the rest).
+
+### 1.6 Page Q&A + element-find flows — REAL (PRD 2 §8–9)
+
+- "What is this page about / यह पेज किस बारे में है" → contextual answer from live Layer A (+B when fresh), spoken via Phase 2 pipeline. Answers quote element counts and section names from the registry — verifiable against the DOM, not plausible-sounding.
+- "Where is X / X कहाँ है" → registry-grounded identification → focus + highlight + spoken result ("Application button. It opens the application form."). No confident match → exact `ELEMENT_NOT_FOUND` speech (PRD 2 §20 honesty rule), never a nearest-guess click.
+
+## 2. EXIT CRITERIA (ALL REQUIRED, LIVE GROQ, EN + HI)
+
+1. Scripted Q&A + find flows (10 questions each language) pass 5/5 on `test-page/` and one qualified real site; every answer's factual claims checkable against the live DOM.
+2. Malformed-output suite (20 recorded-real hostile/malformed responses incl. JS-smuggling, invented IDs, dual-action payloads): 100% rejected by the validator, zero reaching any downstream consumer.
+3. Enrichment non-blocking proof: throttled-network activation still announces first focus within the Phase 2 SLO; Layer B backfills later and is logged.
+4. Token-budget tests: three oversized fixture pages (50KB/200KB/1MB DOM) serialize within cap with cut-logs; sensitive values provably absent from serialized payloads (canary test).
+5. Fallback proof: primary model disabled at the gateway → traffic moves to C3 with zero caller changes; both disabled → honest `AI_SERVICE_UNAVAILABLE` speech + deterministic mode, in EN and HI.
+6. Bilingual: full flow set passes in EN, HI-Devanagari, and Hinglish input; response language mirrors the user in all 30 samples.
+
+*End of PRD 6.4 v1.0.*

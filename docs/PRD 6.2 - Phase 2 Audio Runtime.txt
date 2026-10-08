@@ -1,0 +1,74 @@
+# PRD 6.2 — Phase 2: Audio Runtime
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.2 — Phase 2 Implementation (Audio Runtime)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 2.
+**Objective:** Every spoken word in the product flows through one prioritized, interruptible, bilingual audio pipeline backed by **live Google Cloud TTS** with a real `speechSynthesis` fallback. No recorded prompts, no bundled audio lies — synthesis happens per utterance, per language.
+
+> **Credential gate: C2 (OAuth2 access token + GCP project ID, Cloud TTS API + billing + `roles/aiplatform.user`) is required to enter this phase.** There is no simulated TTS. The `speechSynthesis` fallback is genuine local synthesis, not a stand-in. API keys are rejected by the Gemini-TTS API — token auth only.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.1 exit green.
+- C2 provisioned and passing its options-page smoke test (live Gemini EN+HI synthesis returns playable MP3).
+
+## 1. WORK ITEMS
+
+### 1.1 Offscreen document lifecycle — REAL (PRD 4 §6; verified platform rules)
+
+- `src/offscreen/offscreen.html+ts` created with reasons `["USER_MEDIA", "AUDIO_PLAYBACK"]` and a recorded justification string. Single-document manager in the service worker: `ensureOffscreen()` (create-on-demand via `chrome.runtime.getContexts`), heartbeat, explicit `closeDocument()` when idle and no capture session is armed.
+- 30-second `AUDIO_PLAYBACK` rule compliance: the document plays a sub-audible keep-alive only while a speech queue is non-empty or a capture session is armed — never a permanent silent loop to dodge lifetime enforcement.
+- SW↔offscreen protocol uses the §envelope (`OFFSCREEN_*` message types registered in `src/shared/messages.ts`); every audio request carries `{ text, lang, priority, interruptible, requestId }`.
+
+### 1.2 Audio Controller — REAL (PRD 3 §47–50; PRD 4 §37, §92–93)
+
+- Priority queue with preemption per PRD 6 §4.3 (safety/confirmation > agent question > critical error > task status > focus). Higher priority interrupts lower: current `<audio>` element halted, queue entry marked INTERRUPTED, controller state machine transitions IDLE→…→SPEAKING→INTERRUPTED→IDLE with transitions unit-tested.
+- Dedupe: identical consecutive focus announcements collapse to one queue entry. Rapid-Tab soak (20 Tabs in 3s) must leave ≤1 pending announcement — asserted in the exit test.
+- State machine states IDLE / CAPTURING / PROCESSING / SPEAKING / INTERRUPTED / STOPPED shared with Phase 3 capture states (PRD 6.3 completes CAPTURING/PROCESSING).
+
+### 1.3 Gemini TTS client — REAL, live only (PRD 4 §35–36)
+
+- `src/tts/gemini-tts.ts`: REST `generateContent` on the Gemini API with
+  `x-goog-api-key` auth (plain AI Studio key — no OAuth, no project ID),
+  `responseModalities: ["AUDIO"]`, prebuilt voice `Kore`, per-language inline
+  style instruction, `safetySettings: BLOCK_ONLY_HIGH`. Response PCM16 is
+  wrapped to WAV client-side for playback. Per-request ≤3,900 bytes with
+  **sentence-boundary chunking** (split on `.!?…।` + quotes; overlong single
+  sentences hard-split at word boundary and logged). 401/403 maps to
+  invalid-key behavior (re-paste the AI Studio key). Sequential chunk playback
+  through the queue preserves order.
+- Voice routing per PRD 6 §3.2: single model, prebuilt voice `Kore` for both
+  languages (language auto-detected from text), per-language style prefixes;
+  `mixed` utterances split into per-language segments (Devanagari runs → HI
+  prefix), each synthesized separately and played in order. Voice IDs and
+  prompts pinned in `constants.ts`, selectable in config.
+- In-memory audio cache keyed `hash(text+voice+model+lang)` (bounded 50MB, LRU) — cache hits skip network, cache misses synthesize live. Cache is performance, never content: nothing is pre-baked.
+- `src/tts/speech-synthesis-fallback.ts` behind the identical `SpeechOutput` interface (`speak/stop/clearQueue`). Fallback trigger: TTS HTTP failure, C2 absent/quota-exhausted, or per-utterance timeout (8s). Fallback switches mid-queue without caller changes; the switch is logged and (once per session) announced.
+
+### 1.4 Half-duplex gating — REAL (PRD 3 §50; PRD 4 §38)
+
+- While state = SPEAKING, microphone capture is software-paused (Phase 3 owns the mic; this phase owns the gate signal `GATE_CLOSED/GATE_OPEN` messages). Self-talk test: system speaks a 10s passage at full volume with the mic armed — zero transcribable input may reach any pipeline (asserted with a real capture in PRD 6.3 exit; the gate itself is proven here with a loopback energy check).
+- STOP/cancel path: `stop-cancel-task` command and (later) voice STOP halt audio within 200ms and emit `TTS_STOPPED{requestId}` so Phase 5 can tie audio cancellation to action cancellation. This phase implements the audio half; agent wiring completes in PRD 6.5.
+
+### 1.5 Earcons + shortcut wiring — REAL (PRD 6 §4.1–4.2)
+
+- WebAudio-oscillator earcons (listening 660Hz/80ms, captured 440Hz/120ms, error 220Hz/200ms) generated locally in the offscreen doc — zero network, zero latency.
+- All 4 manifest commands wired: toggle-voicelens (starts/stops focus monitoring + announces state), start-voice-capture (arms capture session — full behavior in PRD 6.3), stop-cancel-task (stops audio now; agent cancel in PRD 6.5), repeat-last (re-queues last announcement at same priority).
+
+### 1.6 First-run mic-grant flow — REAL
+
+Options-page "Enable microphone" button (the required user gesture) → `getUserMedia({audio:true})` in the USER_MEDIA offscreen doc → permission persisted by the browser → status (`granted/prompt/denied`) surfaced in popup via `navigator.permissions.query`. Denied state announces remediation steps in EN+HI. No mic code path executes before this grant.
+
+## 2. EXIT CRITERIA (ALL REQUIRED, EN + HI, LIVE SERVICES)
+
+1. SLO: focus move → first audible output ≤800ms p95 on broadband (measured over 100 Tab events on `test-page/`; TTS chunk cache warm and cold reported separately).
+2. Rapid-Tab soak: 20 Tabs in 3s → exactly the final element announced last, ≤1 stale announcement ever audible.
+3. Kill-switch test: revoke/rotate C2 mid-session → pipeline flips to `speechSynthesis` within one utterance, announcement made, zero exceptions, zero silent dead air longer than the fallback's own latency.
+4. Language routing: 20 EN + 20 HI (Devanagari) + 10 mixed utterances each synthesize with the correct `languageCode`/prompt/voice and play to completion; mixed utterances audibly switch voice per span.
+5. Chunking: 12,000-character article section reads to completion in order with no dropped sentences (read flow completes in PRD 6.5; chunking + ordered playback proven here via direct queue injection).
+6. Half-duplex: loopback energy check proves capture gate closed for 100% of SPEAKING duration.
+7. Bilingual: all controller announcements (state changes, fallback notice, mic-denied remediation) verified in EN and HI.
+
+*End of PRD 6.2 v1.0.*
