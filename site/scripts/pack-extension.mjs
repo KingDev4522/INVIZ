@@ -4,7 +4,7 @@
 import { execSync } from "node:child_process";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import zlib from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -138,13 +138,36 @@ function buildZip(files, read) {
   return Buffer.concat(chunks);
 }
 
-if (!existsSync(join(distDir, "manifest.json"))) {
-  console.log("[pack-extension] frontend/dist is missing, building the extension first…");
-  execSync("npm run build --workspace=frontend", { cwd: repoDir, stdio: "inherit" });
+const manifestPath = join(distDir, "manifest.json");
+const truthy = (value) => ["1", "true"].includes(String(value ?? "").toLowerCase());
+const onCI = truthy(process.env.CI) || truthy(process.env.VERCEL);
+
+// When the extension cannot be built (e.g. a site-only install on Vercel has
+// no repo-root toolchain), fall back to the committed zip on CI so the deploy
+// still succeeds. Locally this throws so a broken toolchain is never silent.
+function keepCommittedZip(reason) {
+  const usable = existsSync(outFile) && statSync(outFile).size > 1024;
+  if (onCI && usable) {
+    console.warn(`[pack-extension] ${reason} keeping the committed public/extension/inviz-extension.zip.`);
+    process.exit(0);
+  }
+  throw new Error(`[pack-extension] ${reason} and no usable public/extension/inviz-extension.zip exists.`);
 }
 
-if (!existsSync(join(distDir, "manifest.json"))) {
-  throw new Error("[pack-extension] frontend/dist/manifest.json is still missing after building the extension.");
+if (!existsSync(manifestPath)) {
+  if (!existsSync(join(repoDir, "node_modules"))) {
+    keepCommittedZip("frontend/dist is missing and repo dependencies are not installed (site-only build);");
+  }
+  console.log("[pack-extension] frontend/dist is missing, building the extension first…");
+  try {
+    execSync("npm run build --workspace=frontend", { cwd: repoDir, stdio: "inherit" });
+  } catch {
+    keepCommittedZip("frontend build failed;");
+  }
+}
+
+if (!existsSync(manifestPath)) {
+  keepCommittedZip("frontend build did not produce frontend/dist;");
 }
 
 const files = walk(distDir, distDir).sort();
