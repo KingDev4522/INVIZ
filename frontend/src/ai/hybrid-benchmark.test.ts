@@ -40,7 +40,7 @@ import {
   ModelOutputError,
 } from "../../../shared/response-validator.js";
 import {
-  SYSTEM_PROMPT_V1,
+  SYSTEM_PROMPT_V2,
   HYBRID_SYSTEM_SUFFIX_V1,
 } from "../../../backend/src/ai/schemas.js";
 
@@ -219,11 +219,11 @@ describe("hybrid benchmark (INVIZ_BENCH=1 only)", () => {
 
           const intent = `User goal: ${task.prompt} Determine ONLY the next action.`;
           const domMessages = [
-            { role: "system", content: SYSTEM_PROMPT_V1 },
+            { role: "system", content: SYSTEM_PROMPT_V2 },
             { role: "user", content: buildUserPayload({ intent, lang: "en", pageText: domText }) },
           ];
           const hybridMessages = [
-            { role: "system", content: `${SYSTEM_PROMPT_V1}${HYBRID_SYSTEM_SUFFIX_V1}` },
+            { role: "system", content: `${SYSTEM_PROMPT_V2}${HYBRID_SYSTEM_SUFFIX_V1}` },
             {
               role: "user",
               content: buildUserPayload({ intent, lang: "en", pageText: hybridText }),
