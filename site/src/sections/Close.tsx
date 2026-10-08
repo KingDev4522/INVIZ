@@ -1,4 +1,5 @@
-﻿import { ButtonLink } from "@/components/ui/button";
+﻿import { Download } from "lucide-react";
+import { ButtonLink } from "@/components/ui/button";
 import { revealProps } from "@/lib/reveal";
 
 const SHORTCUTS = [
@@ -74,7 +75,17 @@ export function Install() {
 
         <div className="mt-12 grid gap-10 md:grid-cols-2 md:gap-16">
           <div {...revealProps(0)}>
-            <pre className="overflow-x-auto border border-border bg-muted p-5 font-mono text-[13px] leading-[1.9]">
+            <div className="flex flex-wrap items-center gap-4 border border-border bg-muted/50 p-5 md:p-6">
+              <ButtonLink href="./extension/inviz-extension.zip" download>
+                <Download aria-hidden="true" />
+                Download extension
+              </ButtonLink>
+              <p className="min-w-[220px] flex-1 text-[13px] leading-[1.6] text-muted-foreground">
+                Prebuilt zip from this repository. Extract it, then load the
+                folder unpacked. No build step needed.
+              </p>
+            </div>
+            <pre className="mt-6 overflow-x-auto border border-border bg-muted p-5 font-mono text-[13px] leading-[1.9]">
               <code>
                 {"npm install\nnpm run build --workspace=frontend"}
               </code>
