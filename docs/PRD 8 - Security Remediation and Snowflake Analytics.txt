@@ -1,0 +1,1030 @@
+PRD 8 — Security Remediation & Snowflake Analytics
+
+Project: INVIZ (ContextLens + VoiceLens)
+Document: PRD 8 — Security Remediation & Snowflake Analytics
+Version: 1.0 | Date: 2026-10-08 | Status: Proposed — awaiting owner approval
+Purpose: (a) Register every defect found in a full line-by-line audit of the shipped
+v0.0.2 codebase, severity-ranked with evidence and acceptance criteria; (b) define how
+Snowflake is integrated into INVIZ without violating the project's local-first,
+zero-provider-key privacy architecture.
+Relationship: PRD 1 defines requirements. PRD 2 defines behavior. PRD 3 defines
+architecture. PRD 4 defines technical contracts. PRD 5 defines security/privacy policy.
+PRD 6 defines the build. PRD 7 is the build confirmation record. This document defines
+what must be FIXED, and what gets ADDED on top.
+
+> Scope boundary: This document does NOT redefine product behavior, and does NOT relax
+> any PRD 5 privacy invariant. It treats PRD 5 as binding and designs the Snowflake
+> integration to satisfy it. It does not add product features; the only functional
+> additions are (1) telemetry egress, which is off by default, and (2) the analytics that
+> makes the existing LIVE-PENDING SLOs measurable. Every remediation item is a defect
+> fix against existing stated intent — the code contradicts its own doc comments or its
+> own tests in most cases.
+
+> Reading guide: §0 states the locked constraints. §1 is method + baseline. §2 is the
+> findings register — the core deliverable. §3–§5 are remediation specs with acceptance
+> criteria. §6 is the test-coverage mandate. §7 is architectural debt. §8–§13 are the
+> Snowflake integration. §14 is the delivery plan. §15–§16 are non-goals and open
+> questions for the owner.
+
+> Critical reading note: the test suite is 988 tests / 86 files, all green, typecheck
+> clean — and the four CRITICAL findings in §3 are all live in production paths that
+> have NO test. This document's central engineering claim is that INVIZ's defect rate is
+> governed by test SHAPE, not test COUNT. §6 is therefore not optional cleanup; it is
+> the primary control.
+
+
+================================================================================
+§0. LOCKED CONSTRAINTS
+================================================================================
+
+These are inherited and NOT reopened by this document.
+
+| # | Constraint | Source | Binding on this plan |
+|---|---|---|---|
+| K1 | The frontend holds ZERO provider keys; all provider traffic goes through `backend/` at 127.0.0.1:8787 | PRD 5, ARCHITECTURE.md §1 | Snowflake egress is BACKEND-ONLY. The extension never holds a Snowflake credential and never opens a Snowflake connection. |
+| K2 | Category C values can never reach logs, storage, cache, telemetry, or TTS | PRD 5 §23 | The telemetry outbox (§9) is a new egress path and is therefore a Category C sink. It inherits the full redaction obligation. |
+| K3 | Redaction by default — every log/write path wraps `redact()` | PRD 6 §2.4 | Outbox payloads pass `redactObject` at emission, same single choke point as `logger.emit`. |
+| K4 | No simulated AI; no fixture data in any runtime path | PRD 4 §67 | Snowflake is an ANALYTICS sink. It must never synthesize a model response or substitute for reasoning. §11/§12 retrieval output is advisory context only, never authorization. |
+| K5 | Bilingual English + Hindi end-to-end | PRD 6 D4 | Any embedding model used in §11 must be multilingual. `snowflake-arctic-embed-m-v1.5` is English-only and is therefore PROHIBITED for this project. |
+| K6 | Error vocabulary is exactly PRD 4 §62; speech strings defined once in `shared/messages.ts` | PRD 6 §2.3 | Telemetry failures are silent by construction (§9.4). They never produce user-facing speech. |
+| K7 | Zero runtime dependencies in `backend/` | observed: `backend/package.json` has devDependencies only | No Node Snowflake SDK may be added to `backend/`. Uploader is a thin `fetch` against the Snowflake SQL REST API, or a separate out-of-process uploader. |
+| K8 | WebGuard is the sole authorization gate; verification never authorizes | ARCHITECTURE.md §3.1 | §11/§12 retrieval must run AFTER WebGuard, never before, and can never loosen a WebGuard verdict. |
+| K9 | Live skill proposals are gated on-device by `validateSkill` + `validateStructuredAction` + `ALLOWED_STEP_FIELDS` | `shared/skill-integrity.ts` | A warehouse PROPOSES; the device DISPOSES. Non-negotiable (§11.4). |
+
+Owner decisions still open are listed in §16.
+
+
+================================================================================
+§1. AUDIT BASELINE AND METHOD
+================================================================================
+
+## 1.1 Baseline at time of audit
+
+    package version   0.0.2
+    typecheck         clean (frontend + backend, tsc --noEmit)
+    tests             988 passed / 86 files  (frontend 679/58, backend 309/28)
+    build             reproducible via npm run build --workspaces
+    secrets           npm run scan-secrets clean
+
+## 1.2 Method
+
+Full read of all 53 non-test source files (21 backend + 32 frontend) plus all 20
+`shared/` contract modules, cross-referenced against:
+  - runtime logs actually present in the repo (`backend/server-8787.{out,err}.log`) —
+    several findings below were CONFIRMED EMPIRICALLY from those logs, not theorized;
+  - the shipped `docs/` PRDs and `ARCHITECTURE.md`, to detect code that contradicts its
+    own stated contract;
+  - the existing test suite, to determine which findings CI should have caught.
+
+Every finding carries a `file:line` reference and a short quotation. Findings marked
+**[LOG-CONFIRMED]** were reproduced against captured production output.
+
+## 1.3 Scope measured
+
+    frontend/src/background/agent-controller/controller.ts     2734 lines
+    frontend/src/background/service-worker.ts                   812 lines
+    frontend/src/background/agent-controller/wiring.ts          495 lines
+    backend/src/ai/qwen-client.ts                               578 lines
+    backend/src/gateway/gateway.ts                              388 lines
+
+## 1.4 Severity definitions
+
+| Severity | Meaning |
+|---|---|
+| CRITICAL | Exploitable by a remote party, or silently defeats a core product guarantee (safety, honesty, or correctness of the agent loop). |
+| HIGH | Causes silent data loss, unbounded resource consumption, misdiagnosis of a live failure, or breaks a stated accessibility guarantee for the target user. |
+| MEDIUM | Correctness/robustness defect with a workaround, or a maintainability/performance issue that will cause a future incident. |
+| LOW | Dead code, contract drift, stylistic inconsistency, magic numbers, duplication. |
+
+
+================================================================================
+§2. FINDINGS REGISTER
+================================================================================
+
+Total: 4 CRITICAL · 13 HIGH · 27 MEDIUM · 22 LOW (documented as groups; full LOW list in
+§5.4). Every finding below is reproduced from live source.
+
+--------------------------------------------------------------------------------
+§2.1 CRITICAL
+--------------------------------------------------------------------------------
+
+### C1 — Any website the user visits can drive the AI gateway
+**Severity: CRITICAL** · **Status: LIVE** · **Exploit: remote, no user action beyond
+visiting a page**
+
+`backend/src/http.ts:11-32`
+
+    res.setHeader("Access-Control-Allow-Origin",
+      typeof origin === "string" && origin !== "" ? origin : "*");
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    const requested = req.headers["access-control-request-headers"];
+    res.setHeader("Access-Control-Allow-Headers",
+      typeof requested === "string" && requested !== "" ? requested
+        : "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.setHeader("Access-Control-Max-Age", "86400");
+
+`backend/src/http.ts:70-72`
+
+    export function checkAuth(req, configuredToken) {
+      if (configuredToken === "") return true;
+
+And the shipped default is empty — `backend/.env.example:76`:
+
+    # Leave empty ONLY for loopback development.
+    BACKEND_TOKEN=
+
+The boot log confirms the open mode is live — `configSummary` reports
+`"authMode":"open-loopback-dev"`.
+
+Impact:
+  - Any origin is reflected; requested headers are echoed back; private-network access
+    is unconditionally granted. Any page can `fetch("http://127.0.0.1:8787/v1/tts",
+    {method:"POST", ...})` and READ the response.
+  - Loopback binding is not a mitigation — the browser runs on the victim's own machine.
+  - `/v1/validation` performs LIVE PAID provider calls on every request
+    (`backend/src/routes/health.ts:139-148` runs `checkGroq` + `checkTts` +
+    `checkOpenRouter`). An attacker page can loop it at zero cost to themselves.
+  - `/v1/search` spends one Tavily credit per call.
+  - `setCors` has ZERO test coverage (`backend/src/http.test.ts` has no CORS case).
+
+C2 below compounds this: because the system prompt is client-controlled, C1 gives any
+website both the gateway AND control of the safety instructions given to the model that
+drives the user's browser.
+
+### C2 — Client can replace the backend's entire safety system prompt
+**Severity: CRITICAL** · **Status: LIVE** · **Reachable remotely via C1**
+
+`backend/src/routes/chat.ts:201`
+
+    systemPrompt: typeof body["systemPrompt"] === "string"
+      ? body["systemPrompt"] : undefined,
+
+`backend/src/ai/qwen-client.ts:404`
+
+    { role: "system", content: input.systemPrompt ?? SYSTEM_PROMPT_V2 },
+
+`SYSTEM_PROMPT_V2` (`backend/src/ai/schemas.ts:36-589`) carries every guardrail in the
+product: "NEVER emit JavaScript, selectors, URLs", the `chrome://`/`file:` refusal rule,
+the never-request-a-password/OTP rule, the closed action-key list, and the JSON-only
+output contract. All of it is client-overridable, unbounded in length (only the 8 MB body
+cap applies), on the ONE route that produces browser actions.
+
+`enrichPage` and `qa` are unaffected — they hardcode their prompts.
+
+### C3 — Voice-driven open-redirect: "open <any-domain>" is navigated to with no
+       confirmation
+**Severity: CRITICAL** · **Status: LIVE** · **Code contradicts its own comment**
+
+`frontend/src/background/agent-controller/controller.ts:395-413`
+
+    // directly - no reasoning call, no search, no skill selection. Anything not
+    // listed in OPEN_SITE_ALLOWLIST still goes through the model.        <-- FALSE
+    const OPEN_SITE_RE =
+      /^(?:please\s+)?(?:open|go to|goto|launch|visit)\s+(?:www\.)?
+        (youtube|github|twitter|x|google|reddit|wikipedia|[a-z0-9-]+\.[a-z]{2,})
+        (?:\.com)?\s*(?:please)?[?.!\s]*$/i;
+
+    export function resolveOpenSiteDestination(goal: string): string | null {
+      ...
+      if (/^[a-z0-9-]+\.[a-z]{2,}$/i.test(key)) {
+        return `https://${key}/`;                     // <-- escapes the allowlist
+      }
+      return null;
+
+`OPEN_SITE_ALLOWLIST` (`shared/constants.ts:129-137`) is exactly 7 frozen entries. The
+regex fallback lets ANY domain bypass it entirely. The same hole exists in the compound
+path at `controller.ts:436`.
+
+Consequences:
+  - "open paypal-secure-login.com" → deterministic `navigate`, `confirmed: false`.
+  - WebGuard treats `navigate` as a targetless action (`webguard/policy.ts:80`), so
+    `REQUIRE_CONFIRMATION` is never emitted.
+  - Any speech-recognition confusion becomes an unconfirmed navigation to an
+    attacker-chosen host.
+  - For a BLIND user — who cannot see the address bar change — this is a textbook
+    voice-phishing vector. It is the highest-harm finding in this document relative to
+    the target user population.
+
+### C4 — Click verification is vacuous; the agent believes every click succeeded
+**Severity: CRITICAL** · **Status: LIVE** · **Defeats the entire verify loop**
+
+`frontend/src/background/agent-controller/controller.ts:2145-2147`
+
+    const defaultExpect: Expectation = sideEffecting
+      ? { type: "submit_completed", ...(target !== null ? { target: target.id } : {}) }
+      : { type: "element_present" };
+
+`frontend/src/verification/verification-engine.ts:71-72`
+
+    case "element_present":
+      if (facts.targetPresent === true) return decided("VERIFIED_SUCCESS");
+
+`identity` is set for any target found in the snapshot (`controller.ts:2169`), so
+`targetPresent` is TRUE on the very first 250 ms poll — the clicked element is still on
+the page. Therefore every `click`, `focus`, `scroll`, and `press_key` returns
+`VERIFIED_SUCCESS` without observing any effect whatsoever.
+
+`stateChanging` (`:2148`) only extends the timeout; it never upgrades the expectation to
+`element_state`.
+
+Consequences: `task.completedActions += 1` (`:2176`), the recovery budget resets
+(`:2178`), and a dead button is reported as done. PRD 6 §2's "act → verify" loop is
+formally present but semantically inert for the most common action type.
+
+--------------------------------------------------------------------------------
+§2.2 HIGH
+--------------------------------------------------------------------------------
+
+| ID | Finding | Evidence |
+|---|---|---|
+| H1 | **A NEW `AgentController` is built per voice transcript**, so all in-memory loop state is destroyed between turns. Confirmed: `service-worker.ts:646` calls `buildController(...)` inside the transcript handler. The affected maps are declared at `controller.ts:585-642`: `runCounter`, `secrets`, `readSessions`, `reasks`, `taskAbort`, `consecutiveAsk`, `approvals`, `enrichSuppressed`, `taskTurns`, `activeSkills`, `executionModes`. **Read-aloud "continue" is therefore dead in production** (always "There is nothing to continue"), **Ctrl+Shift+X never aborts the in-flight action**, the documented approvals fix holds only within a single turn, and abandoned `secrets` linger until GC. | `service-worker.ts:646`; `controller.ts:585-642` |
+| H2 | **Full page re-extraction inside the 250 ms verification poll.** `identityPresent()` calls `lens.extract(document)` and discards the result (`void fresh`), but `extract` rebuilds the registry and INCREMENTS the generation. `collectFacts` invokes it up to 3× per tick at 4 Hz ⇒ **~12 full extractions/sec**, and the generation the controller reasoned from diverges from the live generation mid-verification. | `content/content.ts:216-224`, `:287`, `:324`, `:331`, `:379`; `element-registry.ts:46` |
+| H3 | **`fallbackReasonFor` is dead in production.** It tests `err instanceof GatewayError`, but both call sites pass a `QwenError` (built at `qwen-client.ts:345`), so the entire switch is unreachable and every failover logs `*_UNKNOWN`. The existing test passes a `GatewayError` — which is exactly why CI is green. **[LOG-CONFIRMED]**: `"fallbackReason":"OLLAMA_UNKNOWN","reason":"gateway provider: Ollama HTTP 500..."` and `"fallbackReason":"GROQ_UNKNOWN","reason":"gateway rate_limit: Groq rate limited (HTTP 429...)"`. Operationally this destroys provider-failure diagnosability. | `qwen-client.ts:231-250`, `:573`, `:579`; `server-8787.err.log` |
+| H4 | **Provider response bodies are never consumed or cancelled on retry paths** — `continue`s with `res` unconsumed, no `res.body?.cancel()`. With Node's global undici fetch an abandoned response keeps the socket and the undici request-queue entry alive. Leaks one response per attempt precisely during the 429-storm this code exists to handle. (Two other files already do it correctly — `tavily.ts:118`, `groq-tts.ts:189` — so the pattern is known and inconsistently applied.) | `gateway.ts:324-353`; `openrouter.ts:85-104`; `ollama.ts:168-187`; `health.ts:101-104` |
+| H5 | **Timeouts cover response headers only, not the body download.** `clearTimeout` runs in a `finally` around `fetch`, i.e. when fetch RESOLVES on headers — before `res.json()`. A provider that trickles the body hangs the request indefinitely. | `gateway.ts:250-264` (vs correct: `tavily.ts:145`, `groq-tts.ts:209`); `ollama.ts:122-166` |
+| H6 | **`/v1/enrich` collapses every failure to 500, including 429.** `QwenError.httpStatus` is never inspected, unlike `chat.ts:219-221`. **[LOG-CONFIRMED]**: quota exhaustion is reported to the user as "enrichment failed", which is unactionable. | `routes/enrich.ts:53-62`; `server-8787.err.log` |
+| H7 | **`OLLAMA_TIMEOUT_MS` is dead config.** Parsed and advertised in the startup log (`"ollamaTimeoutMs":180000`) but never reaches the request path — `qwen-client.ts:513` hardcodes `180_000` and no non-test caller ever sets `input.timeoutMs`. An operator tuning it gets no effect. | `config.ts:145-148`; `qwen-client.ts:513`; `server-8787.out.log` |
+| H8 | **Unbounded, unvalidated `turnId` is echoed into 2–3 log lines per request.** Accepted with no length or charset bound, body-cap only. From an unauthenticated page (C1) this is log-flood / disk-fill amplification. | `chat.ts:162`; `search.ts:54`; `transcribe.ts:48`; `tts.ts:48` |
+| H9 | **`backendUrl` is unvalidated in the Options page.** No `new URL()` parse, no scheme check, no loopback allowlist, no UI warning when the URL leaves `127.0.0.1`. The bearer token and the full serialized page are then sent to whatever host was typed. `manifest.json` `host_permissions` mitigates via a Chrome prompt, but one click on "always allow" converts a typo into token capture + page exfiltration. | `ui/options/options.ts:154-169`; `wiring.ts:95-100` |
+| H10 | **The external-execution bridge authorizes every task unconditionally**: `authorizedTaskIds: () => true`. The comment calls this "defence in depth"; it is the opposite — it removes the check. `ExecutionPolicy.externalTaskIds` exists for exactly this and is never populated. Combined with the `nativeMessaging` permission and one popup toggle, a single click routes every DOM action to a native host process that can drive the whole browser. | `wiring.ts:264-274`; `harness-bridge.ts:150-152`; `shared/execution.ts:30` |
+| H11 | **`iframes` permission absent and `all_frames: false`.** `contextlens/index.ts:78-81` counts frames as skipped and never descends. Any site whose content lives in an iframe yields an empty registry ⇒ `CANNOT_ACCESS_PAGE`, with no spoken indication of why. Also **no explicit `content_security_policy` key** in the manifest (MV3 default applies in practice — Low in reality, but implicit and unpinned by any test). | `manifest.json:60`; `contextlens/index.ts:78-81` |
+| H12 | **Default `terse` verbosity strips role and state from EVERY focus announcement, and `setVerbosity` is never called in production.** `focus-monitor.ts:356` sets `private verbosity: Verbosity = "terse"`; line 100 returns `""` for the entire hint string. The user hears "Submit" not "Submit, button"; "Email" not "Email, edit box, required, invalid". Toggling a checkbox announces nothing about the new state. This defeats the core value proposition of an accessibility product for its stated audience. | `focus-monitor.ts:100`, `:134-139`, `:356`, `:373` |
+| H13 | **Agent actions are completely silent when VoiceLens is off — which is the DEFAULT state.** `content.ts:63-75` gates all live speech on `voicelensOn()`, and `popup.ts:49` shows "Ready. VoiceLens is off." Meanwhile the agent does `el.focus()`, `setNativeValue(...)`, and `scrollIntoView` + `window.scrollBy`. A blind user's caret jumps and text is typed with zero feedback. Agent-driven changes must be narrated independently of the VoiceLens hover/focus toggle. | `content/content.ts:63-75`; `content/actions.ts:70-71`, `:187-191`; `ui/popup/popup.ts:49` |
+
+--------------------------------------------------------------------------------
+§2.3 MEDIUM (grouped)
+--------------------------------------------------------------------------------
+
+**Backend**
+
+| ID | Finding | Evidence |
+|---|---|---|
+| M1 | **Prototype pollution on the hottest validation path.** `JSON.parse` creates `__proto__` as an OWN ENUMERABLE property, so `Object.entries` yields it and `out["__proto__"] = value` invokes the inherited setter. The closed-schema check uses `Object.keys` (own keys only) so it PASSES, and the next lines read the injected prototype values. Result: a "validated" `AgentOutcome` with zero own properties on `action` and attacker-controlled inherited `action`/`target`/`parameters`. Contained (local object) but a genuine defect inside the exact trust boundary that PRD 4 §79 relies on. | `shared/response-validator.ts:162-166`; `shared/types.ts:598`, `:606`, `:624` |
+| M2 | **`postChat` never checks `res.ok`.** A Groq `400` JSON error body parses fine, so `extractContent` throws `QwenError(..., fatal=true)` and the model-fallback ladder is skipped — a bad request becomes a hard failure instead of a failover. `postTranscription` has the guard; chat does not. | `gateway.ts:361-381` (vs `:398`) |
+| M3 | **Client `mimeType` written verbatim into an outbound multipart header.** No allowlist, no length cap. CRLF injection into the request sent to Groq. | `routes/transcribe.ts:44-47` → `whisper/protocol.ts:37-39` |
+| M4 | **The base64 validation in `/v1/transcribe` cannot fail.** `Buffer.from(s, "base64")` silently skips invalid characters and never throws, so the 400 branch is dead code and arbitrary garbage is uploaded to Groq. Also `MAX_AUDIO_BASE64_CHARS = 7_000_000` is a route-local magic number, violating `shared/constants.ts:2` ("Magic numbers elsewhere are defects"). | `routes/transcribe.ts:15`, `:35-43` |
+| M5 | **Memory amplification.** 8 MB body ⇒ ~24 MB live (chunk accumulate → `Buffer.concat` → `toString` → `JSON.parse`), ×unbounded concurrency. TTS makes 4 more copies with no streaming, and `TTS_MAX_CHARS = 4000` can produce a response well past the 8 MB body cap. | `http.ts:48-59`; `routes/tts.ts:51-58` |
+| M6 | **TTS never feeds the key pool,** contradicting its own file comment ("TTS and reasoning share Groq's quota"). `deps.apiKey ?? deps.pool.next()` with no `reportAuthFailure`/`reportRateLimit`/`reportSuccess`, so a 401-rejected key stays in rotation forever. | `tts/groq-tts.ts:148-152`, `:163` |
+| M7 | **Unbounded exponential backoff in the Ollama client** (`base * 2**attempt`, no cap) while the two cloud clients cap at 5000 ms. | `gateway/ollama.ts:156`, `:183` (vs `gateway.ts:240`, `openrouter.ts:32`) |
+| M8 | **Local inference has no output-token bound.** `localChatBody` returns `{messages}` only, silently dropping `max_completion_tokens`; no `num_predict`/`stop`. A runaway local generation runs to the 180 s abort — exactly the "thinking budget exhaustion → empty content" failure mode the header comment warns about. | `gateway/ollama.ts:129-139`; `qwen-client.ts:409-421`, `:432-454` |
+| M9 | **Pool exhaustion reported as `auth`/fatal 500 instead of 429.** `GatewayError.retryable` is false for `"auth"`, so quota exhaustion surfaces to the client as `REASONING_FAILED`. The message is also inaccurate. | `gateway.ts:305-310`; `qwen-client.ts:345` |
+| M10 | **Race: unsynchronised global state.** `ollamaIsSuspended` CLEARS state as a side effect of a read, so N concurrent turns arriving after the cooldown all pass the "exactly one fresh probe" check and all hit a possibly-still-dead endpoint — defeating the documented bounded-probing invariant. `openrouterSuspended` has lost-update races. All tests run serially with `__resetReasoningRotation()`, so CI cannot see this. | `qwen-client.ts:111`, `:116`, `:149`, `:157-167` |
+| M11 | **The outermost error handler discards the actual error:** `void err` in the catch-all 500. Every other error site in the codebase logs `reason:`; the outermost one does not, so a production 500 is undiagnosable. | `server.ts:141-147` |
+| M12 | **413 leaves the request body undrained and unclosed.** Throwing out of `for await (const chunk of req)` abandons the still-arriving stream; no `req.destroy()`, no `req.resume()` anywhere in `backend/src`, and no `Content-Length` pre-check (so the full 8 MB is uploaded before rejection). | `http.ts:54-56` |
+| M13 | **No graceful shutdown and no global process handlers.** No SIGINT/SIGTERM → `server.close()`, no `uncaughtException`, no `unhandledRejection`. Ctrl-C abandons in-flight 180 s Ollama requests and pooled sockets. | `server.ts:203-212` |
+| M14 | **No server-side rate limiting anywhere.** `/v1/validation` spends live quota and `/v1/search` spends Tavily credits per call, both unbounded. `MAX_QWEN_CALLS_PER_TASK`/`MAX_ENRICH_CALLS_PER_TASK` are frontend-only; the backend enforces no call budget at all. | `routes/health.ts:139-148`; `routes/search.ts`; `shared/constants.ts:112-115` |
+| M15 | **Client disconnect does not cancel provider work.** Nothing ties `req`'s `close` to the provider fetches, so closing the popup mid-turn leaves a live billable inference running. | `gateway.ts:244-265`; `ollama.ts:121-166`; `openrouter.ts:48-83` |
+| M16 | **`turnId` accepted by `/v1/enrich` then dropped** — `enrichPage` has no `turnId` param, so enrichment failures lose turn correlation. Also `EnrichmentInput.ollama` is typed `{url, model}` while the route supplies `{url, model, keepAlive?}`; it should reuse `OllamaRef`. | `routes/enrich.ts:47-50`; `ai/enrichment.ts:21` |
+| M17 | **`OLLAMA_URL` trusted with no scheme/host validation.** `normalizeUrl` only strips trailing slashes, so `OLLAMA_URL=http://169.254.169.254` or a LAN host would receive the full page state AND the hybrid screenshot — despite the file header claiming "INVIZ talks to the user's own Ollama over loopback HTTP". | `config.ts:134-139`; `gateway/ollama.ts:70-72` |
+| M18 | **`loadDotEnv` has no key allowlist and is cwd-dependent.** It injects ANY `KEY=value` from `.env` into `process.env` (`NODE_OPTIONS`, `LD_PRELOAD`, `PATH`, …), and discovery is `process.cwd()`-relative while `npm start` runs from the package dir — starting from a different cwd silently loses all credentials. | `config.ts:66`, `:74-90`; `backend/package.json:9` |
+| M19 | **Contract drift.** `TranscribeRequest.model` silently ignored; `HealthResponse.openrouterConfigured` never returned; `ValidationResponse` has no `ollama` field though the handler returns one. Three parallel status conventions coexist (`{status,payload}` returns, `QwenError.httpStatus`, `GatewayError.status`). | `shared/api.ts:154`, `:210`, `:220-224` |
+
+**Frontend**
+
+| ID | Finding | Evidence |
+|---|---|---|
+| M20 | **Every `chrome.tabs.sendMessage` is unbounded.** Four call sites, no timeout. If the renderer is frozen or the message is lost, the promise never settles; `MAX_TASK_DURATION_MS` is only evaluated BETWEEN steps and the `guard > 40` counter counts iterations, not elapsed time. The loop can wedge forever with no speech and no cancel path. | `browser-executor/executor.ts:84`; `verification-engine.ts:155`; `wiring.ts:364`, `:472`, `:487`; `controller.ts:965`, `:1001` |
+| M21 | **`run()` can exit silently leaving the task ACTIVE forever.** The `guard > 40` `break` is the only exit that does not call `finish()`, so no `LIMIT_REACHED` is ever spoken and no `finish()` occurs. | `controller.ts:962-965` |
+| M22 | **`run()` has no try/catch.** A throw from `stepOnce`/`stepSkill` strands the task ACTIVE and propagates to `service-worker.ts:656-668`, which speaks "AI services are not configured" — a FALSE diagnosis. | `controller.ts:963-982`; `service-worker.ts:656-668` |
+| M23 | **Refusal phrasings can be read as approval.** `isEchoApproval` has NO negation guard (unlike `matchConfirmation`). "I would rather not search" / "skip the search" / "cancel that search" produce `vote === "unclear"` and `toks` contains the target word ⇒ `echoApproved = true` ⇒ **the pending action executes.** | `controller.ts:2456-2476`, `:532-553`; `shared/confirmation.ts:60-89` |
+| M24 | **`serializePage` runs twice per step on identical input, and the serializer is O(n²).** `context-budget.ts:203,213` re-join `lines` and re-estimate tokens INSIDE every loop iteration. ~1800 array joins per call, twice per step. | `controller.ts:1091-1101`, `:1150-1163`; `ai/context-budget.ts:197-253` |
+| M25 | **`storePageState`'s size cap covers only `items`.** `prose`/`structure` are unbounded — `getProseRegions` caps region COUNT at 6 but not region LENGTH, so `parts.join(" ")` can be megabytes. Can exhaust the 10 MB `chrome.storage.session` quota, after which snapshots are silently dropped. Also O(n log n) full re-serialization per push. | `background/page-state-store.ts:89-121`; `content/dom-extractor.ts:435`, `:463`; `shared/constants.ts:204` |
+| M26 | **Preemption abandons the remainder of a long utterance.** A barge-in rejects the `speechSynthesis` promise out of `playEntry`, discarding ALL remaining chunks — while `readSessions.index` has already advanced, so "continue" jumps past the unread text. | `offscreen/audio-controller.ts:224-226`, `:251-260`; `controller.ts:2735` |
+| M27 | **`VoiceTurnManager` sets its mutex AFTER a 250 ms barge-in sleep**, so two presses inside that window both pass the guard and both open capture → transcribe → agent. | `offscreen/voice-controller.ts:111-123` |
+| M28 | **Offscreen document lifecycle.** `ensureOffscreen` can reject under concurrent callers ("Only a single offscreen document may be created") and is called from 5 unwrapped sites; there is NO `chrome.offscreen.closeDocument()` anywhere, so the document and its `AudioContext` live for the whole browser session; and the reasons/justification strings are duplicated in `wiring.ts` and `options.ts`. | `wiring.ts:158-196`; `ui/options/options.ts:245-277` |
+| M29 | **`page-state-store` items are cast, not validated.** `state.items as Array<{...}>` — `Array.isArray` is the only check. Whatever is in `chrome.storage.session` flows into the model prompt AND into WebGuard's `target.sensitive` / `isSubmit` decisions. A garbage `sensitive: false` defeats the sensitivity gate. | `wiring.ts:330-337`, `:399`, `:441`; `webguard/policy.ts:106-117` |
+| M30 | **A11y: any `wheel` event pauses the agent.** Auto-scrolling pages, carousels, inertial-scroll artifacts, and trackpad noise halt the task and require the user to say "resume". For a blind user whose mouse is stationary, `wheel` is the least trustworthy "human intent" signal of the three; `keydown` and `click` suffice. | `content/content.ts:196-204`; `controller.ts:2570-2588` |
+| M31 | **A11y: focus and hover share one dedupe slot,** so tabbing to an element the pointer already sits over is silently swallowed. | `content/focus-monitor.ts:353`, `:400-401`, `:429-430` |
+| M32 | **A11y: unnamed controls and brand chrome are announced as NOTHING.** `isAnnounceableTarget` returns false for an empty name and `isSiteBranding` silences header anchors — strictly worse than a screen reader, which says "blank"/"graphic". Also `roleLabel` falls back to the raw ARIA token for ~15 roles (`listbox`, `option`, `treeitem`, `gridcell`, `alert`, …). | `content/focus-monitor.ts:23-48`, `:63`, `:161-195` |
+| M33 | **A11y: the overlay's cancel prompt is effectively inaccessible and self-arming.** Merely HOVERING the pill rewrites the live-region headline to "Cancel this turn?" and hides the Stop button, with no `mouseleave` handler, no `role="dialog"`, no focus move, and "Yes, stop" as the first button in DOM order. `role="status"` implies `aria-atomic="true"`, so the verbatim transcript is re-announced on every phase change. A 90 s `ABSOLUTE_CAP_MS` `hide()` then removes the only in-UI cancel control mid-turn. For the target audience, Ctrl+Shift+X is the sole reliable stop — precisely the path broken by H1. | `content/voice-overlay.ts:50-51`, `:150-161`, `:236-271`, `:281-283`, `:344-371` |
+| M34 | **`press_key` dispatches only untrusted `keydown`/`keyup`** — no `keypress`, no `repeat`, `isTrusted === false` throughout. Most page handlers ignore these, so `press_key` frequently returns `{ok:true}` while doing nothing — and then verifies vacuously per C4. | `content/actions.ts:194-217` |
+| M35 | **URLs (a common PII/token carrier) are logged verbatim, on every page, on every site.** `logger.info("content script wired (Phase 1+5)", { url: location.href })` includes full query strings. `shared/redact.ts` has NO URL or query scrubbing — only card-number and secret-key redaction. For a privacy product this is the single biggest avoidable log leak, and it is a **direct prerequisite failure for §9** (do not build an egress path on top of an unbounded URL log). | `content/content.ts:462`, `:156`; `controller.ts:824-829`; `shared/redact.ts` |
+| M36 | **Dead `MAX_HYBRID_IMAGE_B64_CHARS`.** Declared at `shared/constants.ts:88` and referenced NOWHERE in the frontend. The client does not enforce the bound it claims the backend enforces. Screenshots are the highest-sensitivity data in the product; a bound that exists only in a comment is not a control. | `shared/constants.ts:88`; `controller.ts:1170-1205` |
+| M37 | **`sensitive` is derived from a narrow regex.** Only `password`, `file`, and OTP-shaped fields are marked sensitive. Card-number, security-answer, and PIN fields are NOT — so they are not gated by WebGuard's sensitivity check, and their typed values go into `task.providedValues`, which is PERSISTED to `chrome.storage.session` and re-sent in every subsequent prompt. | `content/aria-extractor.ts:145-151`, `:200-202`; `webguard/policy.ts:106-117`; `controller.ts:1206-1208`, `:2323` |
+| M38 | **PII persisted to `chrome.storage.local` indefinitely with no way to erase it.** Episodes (opt-in, but `ChromeEpisodeStore.clear()` is never called and there is no UI to disable or delete), voice diagnostics including the MICROPHONE DEVICE LABEL, and the skill registry. | `background/learning/chrome-episode-store.ts:19-25`; `offscreen/offscreen.ts:81-83`, `:223`; `skills/persistence.ts:259-263` |
+
+
+================================================================================
+§3. REMEDIATION SPEC — CRITICAL
+================================================================================
+
+Acceptance criteria are written to be directly testable. Per §6, each ships with tests.
+
+--------------------------------------------------------------------------------
+R-C1. Close the gateway
+--------------------------------------------------------------------------------
+
+Changes to `backend/src/http.ts:11-32`:
+  1. Replace origin reflection with an ALLOWLIST. Accept only:
+       - `chrome-extension://<configured-extension-id>`
+       - `http://127.0.0.1:<port>` and `http://localhost:<port>`
+     Reject everything else by omitting `Access-Control-Allow-Origin` entirely (the
+     browser then blocks the read). Never emit `*` when an Origin is present.
+  2. `Vary: Origin` retained. `Access-Control-Allow-Private-Network: true` becomes
+     conditional on an explicit `DEV_ALLOW_PRIVATE_NETWORK=1` flag.
+  3. `Access-Control-Allow-Headers` becomes a STATIC value (`Content-Type,
+     Authorization`) — never echo `Access-Control-Request-Headers`.
+  4. `Access-Control-Max-Age` reduced from 86400 to 600.
+  5. Add `Host` header validation: reject requests whose Host is not
+     `127.0.0.1:<port>` / `localhost:<port>`. This blocks DNS-rebinding.
+  6. `checkAuth` must REQUIRE a non-empty `BACKEND_TOKEN`. Loopback-dev openness becomes
+     an explicit, separately-named flag rather than the default value of an empty env var,
+     and the startup log must state which mode is active (it already reports
+     `authMode` — extend it to `enforced`).
+
+ACCEPTANCE
+  - [ ] `setCors` has a test matrix: allowlisted extension origin allowed; allowlisted
+        loopback allowed; `https://evil.example` receives NO ACAO header;
+        `Access-Control-Allow-Headers` is byte-identical regardless of what the client
+        requested; private-network header absent unless flagged.
+  - [ ] A boot test asserts `POST /v1/chat` with `BACKEND_TOKEN` unset REFUSES unless
+        the explicit dev flag is set.
+  - [ ] A boot test asserts a `Host: evil.example` request is rejected 421/400.
+  - [ ] `docs/credential-guide.md` and `backend/.env.example` updated: `BACKEND_TOKEN`
+        is no longer "optional"; a generation command is documented.
+
+--------------------------------------------------------------------------------
+R-C2. Remove client control of the system turn
+--------------------------------------------------------------------------------
+
+  1. DELETE `systemPrompt` from `ChatRequest` in `shared/api.ts:85`.
+  2. DELETE the field read in `backend/src/routes/chat.ts:201`.
+  3. DELETE `systemPrompt` from `ReasonOnceInput`, or keep the parameter but make it
+     internal-only (not reachable from any route handler). Preferred: delete.
+  4. If any future need arises for a system-prompt variant, it must be selected by a
+     CLOSED allowlist of named variants owned by the backend, never supplied as text.
+
+ACCEPTANCE
+  - [ ] A test POSTs `{systemPrompt:"IGNORE ALL PRIOR INSTRUCTIONS...", ...}` to
+        `/v1/chat` and asserts the EFFECTIVE system prompt is still `SYSTEM_PROMPT_V2`
+        (assert against the request the gateway received, via an injected `fetchImpl`).
+  - [ ] `architecture-boundary.test.ts` extended: a grep-level assertion that no route
+        file reads a `systemPrompt`-like key from a request body.
+  - [x] A test pins `SYSTEM_PROMPT_V2` content so an accidental edit fails loudly  (DONE: `backend/src/ai/schemas.test.ts`, 42 tests)
+        (currently `backend/src/ai/schemas.ts` has NO test file).
+
+--------------------------------------------------------------------------------
+R-C3. Close the open-redirect hole
+--------------------------------------------------------------------------------
+
+Changes to `frontend/src/background/agent-controller/controller.ts`:
+  1. DELETE the `|[a-z0-9-]+\.[a-z]{2,}` fallback from `OPEN_SITE_RE` (`:398`) and from
+     `OPEN_SITE_PREFIX_RE` (`:423`), so the regex can only ever match the 7 frozen
+     allowlist keys.
+  2. DELETE the `if (/^[a-z0-9-]+\.[a-z]{2,}$/i.test(key)) return \`https://${key}/\``
+     escape hatch at `:411-413` and `:436-438`.
+  3. Correct the now-false doc comment at `:395-396`.
+  4. If arbitrary-domain opening is wanted as a FEATURE later, it is a new outcome type
+     with a mandatory spoken destination confirmation ("Open paypal-secure-login dot com?
+     yes / cancel") routed through WebGuard — explicitly out of scope here.
+
+ACCEPTANCE
+  - [ ] Table-driven test: every `OPEN_SITE_ALLOWLIST` key resolves; `evil.com`,
+        `paypal-secure-login.com`, `localhost`, `127.0.0.1`, and `a.b` all return
+        `null` (⇒ routed to the model).
+  - [ ] Compound-path equivalents for `resolveOpenSitePrefix`.
+  - [ ] A test asserts the spoken WebGuard verdict for a deterministic `navigate` to a
+        non-allowlisted host is never `ALLOW` without confirmation.
+
+--------------------------------------------------------------------------------
+R-C4. Make click verification mean something
+--------------------------------------------------------------------------------
+
+Changes to `frontend/src/background/agent-controller/controller.ts:2144-2156`:
+  1. `element_present` is PROHIBITED as a default expectation for a MUTATING action.
+     A mutating action (`click`, `press_key`, `select`) whose model-supplied `expect` is
+     absent or whose `expect.target` was dropped as a phantom MUST default to a
+     differential expectation:
+       - `element_state` with a before/after comparison where the target has a stateful
+         role (`switch`, `checkbox`, `combobox`, `option`, `tab`, `disclosure`); OR
+       - a URL/navigation change (`url_changed`) where the target is a link or control
+         with navigation semantics; OR
+       - `submit_completed` for submit-like controls (existing behaviour, unchanged).
+     For genuinely non-mutating actions (`focus`, `scroll`, `read`) `element_present`
+     remains valid.
+  2. The verification engine must therefore receive a BEFORE snapshot for
+     state-observing expectations, not only AFTER facts. This is the missing capability
+     that makes `element_state` implementable — it requires a plumbing change, not just a
+     default change. Budget it.
+  3. `stateChanging` (`:2148`) currently only extends the timeout; it must also select
+     the differential expectation.
+  4. As an INTERIM safety net (shippable in the same phase, independent of the plumbing):
+     treat "target still present, zero other observable delta" as `UNKNOWN`, not
+     `VERIFIED_SUCCESS`. A vacuous pass must never increment `completedActions`.
+
+ACCEPTANCE
+  - [ ] Test: click a control that does nothing ⇒ verdict is NOT `VERIFIED_SUCCESS`;
+        `completedActions` does not increment; the recovery budget is consumed.
+  - [ ] Test: click a checkbox ⇒ `element_state: checked` is detected.
+  - [ ] Test: click a link that navigates ⇒ `navigation_completed` / `url_changed`
+        detected and `navigatedAway` does not mask it as `STALE_STATE`.
+  - [ ] Test: `focus`/`scroll` on an existing element still verify successfully (no
+        regression for non-mutating actions).
+  - [ ] The WebGuard-invariance property test is extended to cover the new default:
+        same verdict, same target, image or not.
+
+
+================================================================================
+§4. REMEDIATION SPEC — HIGH
+================================================================================
+
+| ID | Fix | Acceptance |
+|---|---|---|
+| R-H1 | **Single long-lived controller.** Hoist `buildController` out of the per-transcript handler. Maintain ONE controller instance, rehydrating its maps from `chrome.storage.session` on service-worker restart and flushing on `chrome.runtime.onSuspend`. Migrate the session maps to `chrome.storage.session` so they survive the 30 s idle worker teardown. | Test: two sequential voice turns → "continue" resumes the read session rather than saying "There is nothing to continue." Test: Ctrl+Shift+X during an in-flight action aborts it (`taskAbort` populated). Test: service-worker restart mid-task → state rehydrated. |
+| R-H2 | **Remove `lens.extract` from the verification poll.** `identityPresent` must consult the existing registry snapshot, not re-extract. If re-validation is genuinely needed, throttle to at most once per 500 ms and do NOT bump the generation mid-verification. | Test: instrument `extract` with a counter; a 6 s verification round performs ≤ 2 extractions (not ~72). |
+| R-H3 | **Fix `fallbackReasonFor`.** Carry `GatewayError.kind` onto `QwenError` (add a `providerKind` field), and branch on it. Rewrite `provider-abstraction.test.ts` to use the error type actually passed in production. | Test asserts the exact log `fallbackReason` string for a 429, a 401, a timeout, a network error, and a schema error — per provider. |
+| R-H4 | **`res.body?.cancel()`** on every non-success response path in `gateway.ts`, `openrouter.ts`, `ollama.ts`, `health.ts`. | Test: injected `fetchImpl` returning an unconsumed 429 response ⇒ `cancel()` called. |
+| R-H5 | **Move `clearTimeout` to cover the body read** in `gateway.ts` and `ollama.ts`, matching the correct pattern already in `tavily.ts`/`groq-tts.ts`. | Test: a `fetchImpl` that resolves headers then stalls ⇒ abort fires at the timeout. |
+| R-H6 | **Map `QwenError.httpStatus` in `/v1/enrich`** exactly as `/v1/chat` does (429 → `RATE_LIMITED`, timeout → `PROVIDER_TIMEOUT`). | Test: enrich under provider 429 returns `RATE_LIMITED`, not `ENRICH_FAILED`. |
+| R-H7 | **Wire `config.ollamaTimeoutMs` into `reasonOnce`,** or delete the knob. Wiring is preferred (the startup log advertises it). | Test asserts the configured value reaches the request; a second test asserts an out-of-range value is rejected per `.env.example:67`. |
+| R-H8 | **Bound `turnId`**: ≤ 64 chars, `^[A-Za-z0-9_-]{1,64}$`. Reject otherwise. Also validate `image.timings` values are finite numbers and clamp `sourceWidth`/`sourceHeight`. | Test: an 8 MB `turnId` is rejected 400 and appears in NO log line. |
+| R-H9 | **Validate `backendUrl`.** Parse with `new URL()`; require `http:`/`https:`; require loopback host unless an explicit "allow remote backend" toggle is set, with a persistent, loud warning in Options. Never store a token for a non-loopback host without that toggle. | Test: `javascript:`, `file:`, `http://10.0.0.5:8787` are rejected or gated; `http://127.0.0.1:8787` accepted. |
+| R-H10 | **Populate `ExecutionPolicy.externalTaskIds`** from tasks that were explicitly authorized at popup-toggle time, and delete `authorizedTaskIds: () => true`. Require a per-session re-confirmation. | Test: with the harness toggle on, a task NOT in `externalTaskIds` routes locally. `chooseExecutionMode` already fails closed in three gates — this only removes the bypass. |
+| R-H11 | **Add `"iframes"` + `all_frames: true`; pin an explicit `content_security_policy`;** extend `content.ts` to walk same-origin frames and merge registries with prefixed ids, reporting cross-origin frames as `skipped.frames` WITH a spoken reason. | Test: a two-frame fixture page yields a non-empty registry. `final-audit.test.ts` asserts the CSP key is present. |
+| R-H12 | **Default `verbosity` to `"standard"`,** or make it config-driven from `STORAGE_KEY_CONFIG` (which popup/options already read). Extend `ROLE_LABELS` to the missing roles and `stateBits` to `readonly`/`open`/`level`. Persist a `mouseleave` guard for the overlay (§M33). | Test: focusing `<button>` announces name + role; focusing a required invalid email announces state; toggling a checkbox announces the new checked state — in EN and HI. |
+| R-H13 | **Narrate agent-driven changes independently of VoiceLens.** Introduce a separate always-on channel for agent-initiated mutations (focus move, type, scroll, navigate) distinct from the user-initiated hover/focus lens. | Test: with `voicelensEnabled === false`, a completed agent `type` action still produces exactly one announcement. |
+
+
+================================================================================
+§5. REMEDIATION SPEC — MEDIUM & LOW
+================================================================================
+
+## 5.1 Backend
+
+| ID | Fix |
+|---|---|
+| R-M1 | Reject `__proto__` / `constructor` / `prototype` in `normalizeActionInput`; use `Object.create(null)` for the output object. Add a hostile-input test with `{"__proto__":{"action":"click","target":"e1"}}`. |
+| R-M2 | Add the `!res.ok` guard to `postChat`, mirroring `postTranscription`. |
+| R-M3 | Allowlist `mimeType` against a small set (`audio/webm`, `audio/webm;codecs=opus`, `audio/ogg`, `audio/mpeg`, `audio/wav`, `audio/webm;codecs=mp3`) with a length cap. |
+| R-M4 | Validate base64 with a charset+length regex BEFORE `Buffer.from`. Move `MAX_AUDIO_BASE64_CHARS` into `shared/constants.ts`. |
+| R-M5 | Add a `Content-Length` pre-check; `req.destroy()` + `req.resume()` on 413; stream the TTS response rather than buffering 4 copies. |
+| R-M6 | Report TTS success/auth/rate-limit back to `GroqKeyPool`. Remove the dead `deps.apiKey` parameter. |
+| R-M7 | Cap the Ollama backoff at 5000 ms, matching the cloud clients. `unref()` all `sleep()` timers so they do not hold the event loop open. |
+| R-M8 | Send a `num_predict`/token bound on the local path; stop silently dropping `max_completion_tokens`. |
+| R-M9 | Throw a distinct `GatewayError("rate_limit", ...)` when `peekCooling()` exhausts the pool so `retryable` is true and the client sees 429. |
+| R-M10 | Make the suspension read pure: compute `suspended` without mutating; take a single clear transition under one guard. Also `unref()`-style single-flight for the fresh local probe. |
+| R-M11 | Log `reason: <message>` in the outermost catch (redacted). Delete the `void err` lint workaround. |
+| R-M12 | `req.destroy()` + `req.resume()` on the 413 path; pre-check `Content-Length`. |
+| R-M13 | Add SIGINT/SIGTERM → `server.close()` + drain, plus `uncaughtException`/`unhandledRejection` handlers that log and exit non-zero. |
+| R-M14 | Add a per-route, per-origin token-bucket limiter inside `backend/`. `/v1/validation` and `/v1/search` get the tightest budgets. Enforce `MAX_QWEN_CALLS_PER_TASK` server-side, not only in the extension. |
+| R-M15 | Tie `req.on("close")` to the provider `AbortController` for every provider call. |
+| R-M16 | Thread `turnId` through `enrichPage`; fix `EnrichmentInput.ollama` to reuse `OllamaRef`. |
+| R-M17 | Validate `OLLAMA_URL`: scheme `http:`/`https:`, host must be loopback unless an explicit allow-remote flag is set. Reuse the same helper as R-H9. |
+| R-M18 | Allowlist `.env` keys to the documented set; resolve `.env` from the package directory, not `process.cwd()`. |
+| R-M19 | Reconcile the three contract drifts; collapse the three status conventions onto one. |
+
+## 5.2 Frontend
+
+| ID | Fix |
+|---|---|
+| R-M20 | Wrap all four `sendMessage` sites in a shared timeout helper. Extract the common poll loop (three near-identical loops with three different intervals at `wiring.ts:414`, `:213`, `controller.ts:721/737/774`) into ONE shared helper. |
+| R-M21 | The `guard > 40` exit must call `finish(... LIMIT_REACHED ...)` and speak it. |
+| R-M22 | Wrap `run()` in try/catch → `finish(FAILED)` with an honest, specific error code — never "AI services are not configured" for an unrelated throw. |
+| R-M23 | Add an explicit negation guard to `isEchoApproval`, mirroring `matchConfirmation`'s negator set, and default ambiguous refusals to DENY. |
+| R-M24 | Cache `serializePage` per `(generation, needsProse)` and hoist the join/token-estimate out of the loop in `context-budget.ts`. |
+| R-M25 | Bound prose length per region and in total, inside the same cap as `items`; replace the binary search with a length-sum estimate. |
+| R-M26 | On preemption, rewind `readSessions.index` to the last COMPLETED chunk so "continue" resumes correctly. |
+| R-M27 | Set the turn mutex BEFORE the barge-in sleep; close the 250 ms window. |
+| R-M28 | Make `ensureOffscreen` single-flight (memoize the in-flight promise); add an explicit `closeDocument()` lifecycle; deduplicate the reasons/justification constants into `shared/constants.ts`. |
+| R-M29 | Replace the `as` casts at `wiring.ts:330-337`, `:399`, `:441` with real runtime validation of `state.items` (the file already has a 3× duplicated validator — collapse to one). |
+| R-M30 | Remove `wheel` from the trusted-user-input set; keep `keydown` + `click`. If `wheel` retention is wanted, require a magnitude threshold. |
+| R-M31 | Separate dedupe slots for focus and hover. |
+| R-M32 | Announce unnamed controls as an explicit localized token ("unlabelled control", role) rather than silence; extend `ROLE_LABELS` and `stateBits`. |
+| R-M33 | Add `mouseleave` to the overlay; give the Yes/No pair `role="dialog"` + `aria-modal` + a focus move + an announcement; invert DOM order so Cancel is first; re-announce on phase change without re-reading the transcript (split the live region so the transcript is not inside the `aria-atomic` status node); move the Stop control outside the 90 s `hide()`. |
+| R-M34 | Dispatch `keydown`/`keypress`/`keyup` with `repeat`, and verify the action produced an observable delta rather than returning `ok:true` unconditionally. |
+| R-M35 | **Add URL and query scrubbing to `shared/redact.ts`** (strip fragment, strip or hash query values, cap path depth) and apply it at `content.ts:462`, `:156`, `controller.ts:824-829`. Prerequisite for §9. |
+| R-M36 | Enforce `MAX_HYBRID_IMAGE_B64_CHARS` in `controller.ts` before sending; add a test. |
+| R-M37 | Extend `isOtpField`-style detection to card-number, CVV, PIN, and security-answer patterns (naming AND `autocomplete`/`inputmode` hints), and widen the WebGuard sensitivity gate accordingly. |
+| R-M38 | Add Options UI to enable/disable and DELETE persisted episodes, skills, and the diag log; wire the existing-but-uncalled `ChromeEpisodeStore.clear()` and `ChromeLocalSkillStore.clear()`. Stop persisting the microphone device label, or move it to `chrome.storage.session`. |
+
+## 5.3 Also remove or wire (dead code with tests — false confidence)
+
+| Symbol | Location | Action |
+|---|---|---|
+| `handleMcpRequest`, `AgentController.submitAction` | `mcp/mcp-server.ts:300`, `controller.ts:1954` | **Verified: zero call sites outside their own definitions.** ~1000 lines + 428 lines of tests giving a false sense of coverage. Either delete, or gate behind an explicit, permissioned entry point. See §12 before deciding. |
+| `trackEvent` + `setTelemetryEnabled` | `shared/logger.ts:56-84` | **Verified: zero call sites outside `shared/logger.ts`.** This is the designed telemetry hook. §9 wires it. |
+| `serializeRegistry` | `ai/hybrid-registry.ts:71` | Only used by tests; the controller uses `serializePage` even in hybrid mode, so the compact registry never ships. Decide and align the docs. |
+| `setVerbosity`, `highlight`, `clearHighlight`, `broadcast`, `answerQuestion`, `findElement`, `loadPageState`, `loadEpisodes`, `proposeCandidateFromEpisode`, `unimplemented`, `setLogLevel`, the `"busy"` page-observer trigger, `MAX_ENRICH_CALLS_PER_TASK`, `toAIError`, `GroqKeyPool.usableCount`, `OUTCOME_TYPES`, `SYSTEM_PROMPT_VERSION`, `roundRobinCursor`, `KeyState.failures` | various | Each is either wired to a real caller or deleted. A symbol with tests and no caller is worse than a symbol with neither. |
+
+## 5.4 LOW (grouped)
+
+Duplication to consolidate: `isRecord` in 5 route files; `sleep()` 3×; backoff 3×; `TTS_STOP {all}` byte-identical in 2 files; backend credential read in 4 places; HTTP error classification (the 429/401/403 ladder) in 3 places; `VoicePhase` allowlist in 3 places; region-read char cap with 4 different bounds; mic RMS loop in 3 places.
+Contract drift: `sampleRate: 24000` is a lie if the provider returns another rate; `checkTts` returns raw provider error text to the client (`:83-84`, sliced to 160 chars); `TtsRequestError` embeds up to 200 chars of provider body, and `parsed.error?.message` is cast without a type check so a non-string would `TypeError` inside the constructor; Tavily timeouts (`SearchRequestError(504)`) are never read by the route, so they return `500`; TTS timeouts are not classified at all.
+Magic numbers to move into `shared/constants.ts` (which declares "Magic numbers elsewhere are defects"): `guard > 40`, `90_000` ×2 (the `WAITING_FOR_*_TTL_MS` constants are imported at `controller.ts:14-15` and then SHADOWED by literals), `60_000`, `6000`/`3000`/`2000`, `660/440/220`, `80/120/200`, `60/500/450/3000/1500`, ~20 more.
+Stale metadata: `backend/package.json:4` says "Gemini TTS"; the provider is Groq/orpheus. TTS primary path is a stub that throws `TTS_DISABLED`, so every utterance pays a doomed synthesis until `primaryLatchedOff` latches.
+Ops: no `X-Content-Type-Options` / `Cache-Control: no-store` on JSON responses; `authedRoutes` Set allocated per request; `handleHealth` is `async` with no `await`; `port` logged twice; `HTTP_REFERER` hardcodes port 8787; `ENDPOINTS` in `shared/api.ts` is never imported by `backend/`.
+
+
+================================================================================
+§6. TEST COVERAGE MANDATE
+================================================================================
+
+This is the primary control, not cleanup. 988 green tests coexist with 4 CRITICAL live
+defects because the untested surfaces are exactly the ones that matter.
+
+## 6.1 Currently untested source files (no `.test.ts` sibling)
+
+    backend/src/server.ts                  <-- entire HTTP layer: routing, 404/405/401
+                                                 ordering, OPTIONS, 500 catch-all,
+                                                 startup probe. NO test boots the server.
+    backend/src/ai/schemas.ts              (RESOLVED: now pinned by schemas.test.ts, 42 tests)
+    backend/src/ai/enrichment.ts
+    backend/src/routes/health.ts           <-- checkOpenRouter/checkOllama/checkTavily
+                                                 failure paths, noteOllamaProbeHealthy
+    backend/src/routes/transcribe.ts
+    backend/src/routes/tts.ts
+    frontend/src/background/service-worker.ts  (812 lines) <-- ZERO coverage. Every H1
+                                                 defect lives here.
+
+Plus zero-coverage FUNCTIONS in otherwise-tested files: `setCors` (`http.ts`), the
+`identityPresent`/`collectFacts` verification-fact path (`content/content.ts:216-340`),
+and the entire `isEchoApproval` refusal grammar (`controller.ts:532-553`).
+
+## 6.2 Mandatory new suites
+
+1. **`backend/src/server.test.ts`** — boots the real server on an ephemeral port.
+   Asserts: the auth gate on EVERY route; 404/405 ordering; OPTIONS preflight shape;
+   `readJsonBody` 413 mid-stream teardown (socket lifecycle, not just the in-memory
+   oversize case); the catch-all 500 logs a reason; `logRequest` status accuracy; and
+   **C1: a non-allowlisted Origin receives no ACAO header.**
+2. **`backend/src/http.test.ts` extension** — the CORS matrix in R-C1.
+3. **`frontend/src/background/service-worker.test.ts`** — the message router: envelope
+   validation, per-transcript dedupe, cancel sets, badge, `onInstalled`/`onStartup`, and
+   specifically that **one controller instance serves sequential turns** (R-H1).
+4. **System-prompt pin test** (R-C2).
+5. **`shared/response-validator.test.ts` hostile case** — `{"__proto__": ...}` payload (R-M1).
+6. **Concurrency tests against the shared globals** — currently every test calls
+   `__resetReasoningRotation()` and runs serially, so M10's races are structurally
+   invisible. Add a `Promise.all` test over the Ollama cooldown boundary.
+7. **`fallbackReasonFor` test using the production error type** (R-H3).
+8. **Verification engine** — the C4 differential-expectation suite.
+9. **`focus-monitor` a11y suite** — announcement content per role/state, EN and HI (R-H12).
+
+## 6.3 Standing rule (new)
+
+> A source file over 400 lines, or any file in `background/`, `routes/`, `gateway/`, or
+> `verification/`, MUST have a `.test.ts` sibling before merge. A PR adding lines to an
+> untested file without adding tests is rejected.
+
+This is the specific mechanism by which C1–C4 escaped: all four live in files with no
+test, or in functions with no test.
+
+
+================================================================================
+§7. ARCHITECTURAL DEBT (structural, non-defect)
+================================================================================
+
+Recorded here because §8–§13 depend on it. These are not bugs; they are size and
+coupling problems that raise the cost of every future change, including this one.
+
+| Item | Measure | Recommended action |
+|---|---|---|
+| `controller.ts` | 2734 lines; 1 class + ~330 lines of interleaved module-level pure helpers (`:253-582`); mixes task lifecycle, open-site regexes, confirmation grammar, secret slot-fill, read-aloud sessions, episode recording, execution routing, MCP entry, web-search, enrichment | Split into ≥6 modules: `intent-rules.ts` (the pure helpers), `task-lifecycle.ts`, `confirmation.ts`, `read-aloud.ts`, `search.ts`, `enrichment.ts` |
+| `service-worker.ts` | 812 lines; voice mutex + dedupe + cancel sets + badge + a 315-line message router | Extract the router into a dispatch table module |
+| `wiring.ts` | 495 lines; ~120 lines are THREE near-identical ~50-line snapshot validators | Collapse to one `validateStoredPageState()` |
+| `content/content.ts` | 582 lines; 100 lines of verification-fact collection (`:216-340`) belongs in `verification/` | Extract `collectFacts` |
+| Frontend `any` usage | Zero `: any` / `as any` — genuinely clean | Preserve. Nine `as` casts of storage/message payloads in `wiring.ts` are the remaining gap (R-M29) |
+| Backend `any` | Strict `Record` discipline throughout; strict image validation at `chat.ts:42-87` | Preserve. Good work. |
+| Path length | `frontend/src/background/agent-controller/controller.ts` etc. | Acceptable; not worth restructuring |
+
+
+================================================================================
+§8. SNOWFLAKE INTEGRATION — FIT, CONSTRAINTS, NON-GOALS
+================================================================================
+
+## 8.1 The honest tension
+
+INVIZ is a local-first, zero-provider-key, privacy-audited accessibility tool for blind
+users. K1–K9 (§0) are binding. Therefore:
+
+> **Snowflake must never sit in the request path of a voice turn, and must never
+> receive un-redacted page content, screenshots, or user speech.**
+
+Any design that adds latency to a turn, or that ships page text to a cloud, destroys the
+product. This is not a stylistic preference — it is the product.
+
+## 8.2 The fit is unusually good, because the hooks were already built
+
+Three subsystems were **designed for exactly this and never wired**:
+
+| Asset | Location | Verification | Why it fits |
+|---|---|---|---|
+| `trackEvent()` + 9-event metadata-only allowlist, default-off | `shared/logger.ts:56-84` | **Confirmed zero call sites outside `shared/logger.ts`** | A ready-made metadata-only event API that was never finished |
+| `EpisodeStore` port: `load()` / `save(serialized)` / `clear()` | `frontend/src/learning/episode-store.ts:30-34` | Confirmed, with `MemoryEpisodeStore` as the test impl | A clean hexagonal seam. An `Episode` is already a redacted, versioned, JSON per-task event log with a natural PK, natural time columns, and natural dimensions |
+| `mcp/mcp-server.ts` + `mcp-protocol.ts` | `frontend/src/mcp/` | **Confirmed zero call sites** | 7 validated tools; Snowflake ships a managed MCP server speaking the same protocol |
+
+Plus two facts that make ingestion cheap:
+  - The backend already emits **single-line JSON** to stdout at a single choke point
+    (`shared/logger.ts:37`) with `redactObject` applied to every payload (`:36`), and a
+    **stable field vocabulary**.
+  - The backend emits an unusually rich, already-structured latency record per turn
+    (`backend/src/routes/chat.ts:100-139`: `t2_captureMs`, `t4_encodeMs`, `t5_contextMs`,
+    `t7_to_t8_inferenceMs`, `t8_to_t9_validateMs`, `backendTotalMs`, image dims/bytes).
+
+## 8.3 Non-goals (explicit)
+
+| Non-goal | Reason |
+|---|---|
+| Snowflake in the reasoning path | Violates the ≤4 s command→ack SLO (`docs/slo-report.md:25-33`). Warehouse round-trip is 100 ms–seconds. |
+| Storing raw page content, screenshots, transcripts, or spoken goals | K2/K3. Category C values must never reach telemetry. |
+| Snowflake credentials in `frontend/` | K1. |
+| A Node Snowflake SDK in `backend/` | K7 — zero runtime dependencies is a load-bearing property. |
+| Snowflake deciding whether an action is safe | K8. WebGuard is the sole authorization gate. |
+| A warehouse-validated skill executing without on-device validation | K9. |
+| Telemetry ON by default | PRD 5 opt-in discipline. |
+
+## 8.4 The architecture
+
+    +-- extension (holds zero Snowflake credentials) --------+
+    |  controller  --trackEvent(...)-->  shared/logger       |
+    |  recorder.finalize(episode)                           |
+    +---------------------------+----------------------------+
+                                | POST /v1/telemetry/flush  (batched NDJSON)
+                                v
+    +-- backend 127.0.0.1:8787 -------------------------------+
+    |  TURN CRITICAL PATH:  /v1/chat /v1/transcribe /v1/search |
+    |  (NEVER blocks on, NEVER awaits, NEVER fails into,       |
+    |   telemetry — see 8.5)                                   |
+    |                                                         |
+    |  telemetry/outbox.ts  : bounded queue, sync enqueue,    |
+    |                         async flush, drop-oldest         |
+    +---------------------------+-----------------------------+
+                                | Snowflake SQL REST API (fetch, no SDK)
+                                v
+                     INVIZ_RAW  ->  MERGE  ->  FACT_* / DIM_*
+
+The extension NEVER opens a Snowflake connection. K1 preserved.
+
+
+================================================================================
+§9. TIER 1 — TELEMETRY & ANALYTICS PIPELINE
+================================================================================
+
+## 9.1 Scope
+
+Turn the 7 `LIVE-PENDING` SLOs in `docs/slo-report.md:25-33` from "pending" into
+measured, and give the product a fleet-level view of failure modes. That is the whole
+of Tier 1. Nothing else.
+
+The 7 pending SLOs, all of which are ALREADY LOGGED FIELDS:
+  1. Focus → first audio ≤800 ms p95 (warm + cold reported separately)
+  2. Capture stop → transcript ≤2.5 s (≤15 s audio)
+  3. Voice command → spoken ack/question ≤4 s
+  4. Action → verification verdict ≤5 s (local DOM)
+  5. Demo A + B pass 5/5 ×2, EN + HI
+  6. Bilingual audible matrix (qualitative)
+  7. Mic loopback: zero self-transcription
+
+## 9.2 Data flow
+
+  - `trackEvent` is called from the FIVE decision points that already exist in the
+    controller: WebGuard `BLOCK` (`:2082`), `confirmation_requested` (`:2101`),
+    `action_executed` (`:2181`), `verification_failed` (`:2217`), `task_cancelled`
+    (`:2552`). Plus `extension_started` and `voicelens_enabled`.
+  - Payloads are metadata only: `taskId`, `pageGeneration`, `actionType`, `targetId`,
+    `verificationStatus`, `errorCode`, `latencyMs`, plus a `pageHost` derived field.
+  - The extension POSTs batches to a new `PUT /v1/telemetry/flush` route.
+  - The backend enqueues and flushes asynchronously.
+
+## 9.3 Non-blocking guarantee (the hard requirement)
+
+> A telemetry failure must be indistinguishable, from the user's perspective, from
+> telemetry not existing.
+
+Concrete obligations:
+  - Enqueue is **synchronous and O(1)** and NEVER throws.
+  - The flush is NEVER awaited inside `stepOnce`, `doAction`, or any speech path.
+  - The queue is **bounded** (`MAX_QUEUE = 500`, drop-oldest) so memory cannot grow.
+  - On flush failure: drop the batch, increment a counter, log at `debug` only. Never
+    retry in a way that can grow the queue. Never surface to the user (K6 — no new
+    error codes, no new speech strings).
+  - A `TELEMETRY_DISABLED` state must cost nothing measurable. Budget: enqueue <50 µs.
+
+## 9.4 Backend implementation sketch
+
+    // backend/src/telemetry/outbox.ts   (new)
+    type TelemetryEvent = {
+      event: string; ts: number; taskId?: string; pageGeneration?: number;
+      actionType?: string; targetId?: string; verificationStatus?: string;
+      errorCode?: string; latencyMs?: number; pageHost?: string;
+    };
+
+    const MAX_QUEUE = 500;
+    const queue: TelemetryEvent[] = [];
+    let dropped = 0;
+
+    export function record(e: TelemetryEvent): void {   // sync, O(1), NEVER throws
+      if (!telemetryEnabled) return;
+      try {
+        queue.push(redactObject(e) as TelemetryEvent);   // K3: single redaction point
+        if (queue.length >= MAX_QUEUE) { queue.shift(); dropped += 1; }
+      } catch { /* telemetry must never throw */ }
+    }
+
+    export function drain(): TelemetryEvent[] { const b = queue.slice(); queue.length = 0; return b; }
+
+The uploader calls `drain()` and writes NDJSON. Per K7, use a thin `fetch` against the
+Snowflake SQL REST API (`POST /api/v2/statements` with a `MULTI_STATEMENT_COUNT`
+batch), or run the uploader as a **separate out-of-process script** so `backend/`
+gains zero dependencies. Recommended: separate process. It also means a hung warehouse
+connection can never affect the gateway.
+
+## 9.5 Schema
+
+    FACT_EPISODE
+      EPISODE_ID        VARCHAR  PK      -- 'ep_' || taskId
+      TASK_ID           VARCHAR
+      CREATED_AT        TIMESTAMP_NTZ      -- Episode.createdAt
+      RECORDED_AT       TIMESTAMP_NTZ      -- Episode.recordedAt
+      GOAL_LANG         VARCHAR             -- 'en' | 'hi' | 'mixed'
+      GOAL_HASH         VARCHAR             -- SHA-256 of the goal, NOT the goal
+      PAGE_HOST         VARCHAR             -- registrable domain only, no path
+      PAGE_TITLE_HASH   VARCHAR             -- hash, not title
+      FINAL_STATUS      VARCHAR             -- COMPLETE|CANCELLED|BLOCKED|FAILED|LIMIT_REACHED
+      SUCCESS           BOOLEAN
+      COMPLETED_ACTIONS NUMBER
+      RECOVERY_EVENTS   NUMBER
+      FINAL_OUTCOME_TYPE VARCHAR
+      GENERATION_COUNT  NUMBER              -- cardinality of pageGenerations[]
+      SKILL_ID          VARCHAR
+      SKILL_VERSION     VARCHAR
+      SKILL_STATUS      VARCHAR
+
+    FACT_EPISODE_ACTION
+      EPISODE_ID        VARCHAR  FK
+      IDX               NUMBER
+      ACTION_TYPE       VARCHAR
+      STATUS            VARCHAR             -- executed|failed|blocked|awaiting_confirmation|read|not_run
+      EXECUTION_MODE    VARCHAR             -- local|external
+      PAGE_GENERATION   NUMBER
+      VERIFY_OUTCOME    VARCHAR             -- VERIFIED_SUCCESS|VERIFIED_FAILURE|STALE_STATE|UNKNOWN
+      VERIFY_SUCCESS    BOOLEAN
+      VERIFY_TIMED_OUT  BOOLEAN
+      EXPECT_TYPE       VARCHAR
+      TARGET_ID         VARCHAR             -- 'eNN' — NOT a selector, never a URL
+
+    FACT_TURN_LATENCY                      -- SLO 1-4, from chat.ts:100-139
+      TURN_ID VARCHAR, TS TIMESTAMP_NTZ, PROVIDER VARCHAR, CONTEXT_MODE VARCHAR,
+      T2_CAPTURE_MS NUMBER, T4_ENCODE_MS NUMBER, T5_CONTEXT_MS NUMBER,
+      T7_TO_T8_INFERENCE_MS NUMBER, T8_TO_T9_VALIDATE_MS NUMBER,
+      BACKEND_TOTAL_MS NUMBER, IMAGE_BYTES NUMBER, REASKS NUMBER
+
+    FACT_TELEMETRY_EVENT                   -- the 9 trackEvent names
+      EVENT VARCHAR, TS TIMESTAMP_NTZ, TASK_ID VARCHAR, ERROR_CODE VARCHAR,
+      VERIFICATION_STATUS VARCHAR, ACTION_TYPE VARCHAR, PAGE_GENERATION NUMBER,
+      LATENCY_MS NUMBER, PAGE_HOST VARCHAR
+
+    DIM_SKILL_REGISTRY
+      SKILL_ID VARCHAR, VERSION VARCHAR, STATUS VARCHAR, EFFECTIVE_AT TIMESTAMP_NTZ
+
+**`GOAL_HASH`, `PAGE_TITLE_HASH`, `PAGE_HOST`, and `TARGET_ID` carry masking policies
+(§13.2).** The goal itself is NEVER stored — hashing preserves grouping ("all 'open
+youtube and play X' tasks") with zero user text leaving the machine.
+
+Note `SkillCandidate.evidence` (`learning/candidate.ts:43-47`) plus `sourceEpisodeIds`
+(`:42`) is exactly the lineage a warehouse can enforce as a real FK; today it is an
+unenforced `string[]`.
+
+
+================================================================================
+§10. TIER 1 ACCEPTANCE CRITERIA
+================================================================================
+
+  - [ ] `trackEvent` has ≥5 production call sites; `rg -n trackEvent --glob '!*.test.ts'`
+        returns >1 file.
+  - [ ] With telemetry disabled, a full voice turn shows NO measurable latency delta
+        (asserted by the existing benchmark harness, `test-page/bench/`).
+  - [ ] With the warehouse unreachable, 100 consecutive voice turns complete normally and
+        speak no error. This is an explicit regression test.
+  - [ ] Queue never exceeds `MAX_QUEUE` under a synthetic 10,000-event burst; memory is
+        bounded; `dropped` is reported in `/v1/health` as a count.
+  - [ ] No Category C value appears in any flushed payload — asserted by a test that
+        runs the full redaction chain over a hostile event set.
+  - [ ] `npm run scan-secrets` still clean; `SNOWFLAKE_*` variables added to
+        `backend/.env` only, and `scripts/scan-secrets.js` patterns extended to catch
+        Snowflake key formats.
+  - [ ] `backend/package.json` still has NO `dependencies` field (K7 regression guard —
+        add this as an explicit assertion in `config.test.ts` or a small repo test).
+  - [ ] The 7 LIVE-PENDING SLOs in `docs/slo-report.md` are updated to MEASURED, or
+        explicitly re-declared pending with the reason. A pending item is not a pass
+        (that document's own rule).
+
+
+================================================================================
+§11. TIER 2 — FLEET LEARNING LOOP
+================================================================================
+
+## 11.1 The gap this closes
+
+Today `proposeCandidateFromEpisode` (`learning/candidate.ts:107-209`) mines **exactly one
+episode at a time** and runs only in tests. It structurally cannot notice that 40
+episodes across 12 users each did the same 3 actions on the same host. That is the single
+biggest latent capability in the codebase — and it is currently unreachable.
+
+## 11.2 Cross-episode candidate mining
+
+    SELECT PAGE_HOST, GOAL_HASH,
+           MODE() WITHIN GROUP (ORDER BY ACTION_TYPE) AS action_seq,
+           COUNT(*)                        AS episodes,
+           AVG(COMPLETED_ACTIONS)         AS avg_len,
+           SUM(IFF(SUCCESS,1,0))/COUNT(*) AS success_rate
+    FROM   FACT_EPISODE_ACTION JOIN FACT_EPISODE USING (EPISODE_ID)
+    GROUP  BY 1, 2
+    HAVING COUNT(*) >= 20 AND success_rate > 0.8
+    ORDER  BY episodes DESC;
+
+Emits **ranked** `SkillCandidate` proposals, pushed to devices as suggestions.
+
+## 11.3 Cortex Search over failure text (targets an admitted product limit)
+
+`docs/ARCHITECTURE.md:307-313` admits: small local models cannot reliably hold the JSON
+action contract across multi-step tasks, so agency quality still depends on the cloud
+tier. A retrieval layer that tells the model "this class of goal has historically failed
+here, and here is what worked" attacks that limit directly.
+
+Index:
+  - **failure text** — `finalOutcomeText` + `expectType` for failed actions
+  - **successful action sequences** — as few-shot exemplars
+
+Feed into `/v1/enrich` as **advisory context only**. Per K8 and the Layer-B rule in
+`ARCHITECTURE.md:48`, enrichment is `MODEL_INFERENCE` provenance and is **never
+authorization**. It cannot loosen a WebGuard verdict.
+
+**Embedding model constraint (K5):** must be multilingual. `snowflake-arctic-embed-m-v1.5`
+is **English-only and PROHIBITED**. Use `voyage-multilingual-2` or
+`snowflake-arctic-embed-l-v2.0-8k`.
+
+## 11.4 The device disposes (K9 — non-negotiable)
+
+A warehouse proposes; the device disposes. Any proposal arriving from Snowflake MUST
+still pass, on-device, before it can become a skill:
+  1. `validateSkill` (`shared/types.ts` / `skill-validation.ts`)
+  2. `validateStructuredAction` — closed schema, `KNOWN_FIELDS`, `ELEMENT_ID_RE`,
+     `PRESS_KEY_ALLOWLIST`, `NAVIGATE_DENIED_SCHEMES`
+  3. `ALLOWED_STEP_FIELDS` (`candidate.ts:216-225`) — rejects smuggled fields
+  4. The CDP / shell / `eval` structural rejection in `candidate.ts`
+  5. `status: "candidate"`, `testStatus: "untested"`, `canaryRolloutPercent: 0` — a
+     remote proposal NEVER arrives pre-trusted
+
+If any step rejects it, it is dropped and the rejection is logged locally. A warehouse
+must not be able to shortcut local validation. Add an explicit test asserting a
+hostile warehouse response cannot produce a `trusted` skill.
+
+
+================================================================================
+§12. TIER 3 — MCP (OPTIONAL, GATED, LAST)
+================================================================================
+
+Snowflake shipped a managed MCP server (GA 2026-08-07) exposing `CORTEX_SEARCH_SERVICE_QUERY`,
+`CORTEX_ANALYST_MESSAGE`, `CORTEX_AGENT_RUN`, `SYSTEM_EXECUTE_SQL`, over OAuth 2.0, MCP
+revision `2025-11-25`. INVIZ already has an unwired MCP server with 7 validated tools.
+The fit is aesthetically perfect and operationally a trap. Reasons to defer:
+
+  1. `SYSTEM_EXECUTE_SQL` exposed to an agent that operates a BLIND USER'S BROWSER is a
+     genuine hazard. At most, a read-only Cortex Search tool may ever be exposed.
+  2. `frontend/src/mcp/mcp-server.ts` is **dead code with 428 lines of tests** and has
+     never executed in production. `shared/mcp-protocol.ts` also cannot negotiate MCP
+     rev `2025-11-25`.
+  3. There is no `externally_connectable` and no MCP permission in the manifest.
+  4. It adds a network dependency to a product whose reliability claim is
+     "backend down ⇒ honest 'AI service unavailable'", never a hang.
+
+**Recommendation: do not build Tier 3 in this program.** If it is later wanted, build it
+FRESH as a narrow read-only "learned site knowledge" tool, route it through `wiring.ts`
+so WebGuard sees it, keep `SYSTEM_EXECUTE_SQL` permanently disabled, and require a
+separate owner decision (§16). Tier 1 + Tier 2 deliver the entire value without it.
+
+Note: `handleMcpRequest` and `AgentController.submitAction` should be deleted or gated
+per §5.3 regardless of whether Tier 3 ever happens. Shipping 1000 lines of unwired code
+with 428 lines of tests is an active liability.
+
+
+================================================================================
+§13. PRIVACY & DATA-PROTECTION GATES
+================================================================================
+
+Non-negotiable. Each gate is a release blocker.
+
+## 13.1 Default-off and informed consent
+
+  - `setTelemetryEnabled(false)` ships as the default. No env var flips it on; only an
+    explicit user action in the Options page.
+  - The Options UI does not exist yet — build it as part of Tier 1, stating plainly what
+    is sent, and providing a WORKING DELETE.
+  - The toggle must survive `wiring.ts:28-36`-style fail-closed reads.
+  - No dark patterns: the toggle defaults off, and is not pre-checked.
+
+## 13.2 Column masking in Snowflake
+
+  - `GOAL_HASH`, `PAGE_TITLE_HASH`, `PAGE_HOST`, `TARGET_ID` carry masking policies so
+    even account analysts cannot reverse them.
+  - Raw free text (`finalOutcomeText`, `goal`) is NEVER ingested in the first place.
+    Hash at the source.
+
+## 13.3 Retention, Time Travel, and erasure
+
+  - `deleteEpisode` / `clearEpisodes` (`episode-store.ts:201-216`) already imply GDPR-style
+    erasure. **If the warehouse copy cannot be erased, that is a compliance bug**, because
+    the user believes they deleted.
+  - Set `DATA_RETENTION_TIME_IN_DAYS` on raw tables; map the Options delete button to a
+    real `DELETE`; document Time Travel's own retention as part of the erasure story.
+  - Define and publish the retention window in the Options UI.
+
+## 13.4 Fix the leak that already exists FIRST (R-M35)
+
+`content/content.ts:462` logs full `location.href` with query strings on **every page
+load, on every site**, and `shared/redact.ts` has **no URL or query scrubbing at all**.
+
+> Do NOT build an egress path on top of an unbounded URL log. R-M35 is a PREREQUISITE
+> for Tier 1, not a co-requisite. Ship it first.
+
+## 13.5 Enforce the screenshot bound (R-M36)
+
+`MAX_HYBRID_IMAGE_B64_CHARS` exists in `shared/constants.ts:88` and is referenced
+NOWHERE. **Pixels never leave the machine, ever.** Enforce the bound client-side in
+`controller.ts` and add a test. The `LOCAL-ONLY` rule in `ARCHITECTURE.md:377-380` is
+load-bearing for the privacy model and currently has no enforcement point in the client.
+
+## 13.6 The three highest-risk fields
+
+`pageUrl`, `pageTitle`, `finalOutcomeText`. `safePageUrl` (`episode.ts:128-138`) strips
+query and fragment but **retains host + path**, and paths are frequently identifying
+(e.g. `/users/<name>/...`). Hash host, hash title, and DROP `finalOutcomeText` from the
+Tier 1 payload entirely — keep it locally for diagnostics, where it stays on-device.
+
+## 13.7 Governance features to use
+
+Snowflake's Horizon Catalog / Iceberg interoperability (GA 2026) allows a masking policy
+to travel with the table. Use it so the protection is a property of the DATA, not of a
+dashboard someone forgets to configure.
+
+
+================================================================================
+§14. DELIVERY PLAN
+================================================================================
+
+Hard ordering. Phase 0 must complete before Phase 2 begins — you do not want an
+analytics egress path built on a gateway any webpage can drive.
+
+| Phase | Content | Gate to pass |
+|---|---|---|
+| **0. Close the holes** (PREREQUISITE) | C1, C2, C3, C4 (incl. the C4 plumbing change). R-H1, R-H2, R-H3. §6.1 suites 1–3 (server.ts, http CORS matrix, service-worker.ts). R-M11, R-M35, R-M36. | CORS matrix green; `BACKEND_TOKEN` enforced; system prompt pinned and untouchable; non-allowlisted domains never navigate deterministically; a no-op click does not verify; "continue" works across turns; stop aborts; `tsc` clean; 988 existing tests still green; **new** tests ≥ 40 |
+| **1. Harden** | R-H4–R-H10, R-M1–M10, R-M20–M25. | `scan-secrets` clean; zero unbounded `sendMessage`; every 429 path returns 429; `npm test` green |
+| **2. Accessibility & consent** | R-H11–R-H13, R-M26–M34, R-M37, R-M38. Build the Options telemetry toggle + delete UI (13.1). | EN+HI announcement tests green for role/state/cancel; a blind-user walkthrough confirms agent actions are narrated with VoiceLens off |
+| **3. Local analytics validation** | `telemetry/outbox.ts` + `PUT /v1/telemetry/flush` + the §9.5 schema, **writing NDJSON to local disk only**. Wire the 5+ `trackEvent` call sites. | Schema validated against real captured traffic; zero user-visible latency; unreachable-warehouse regression test green (10.1) |
+| **4. Snowflake connect** | Point the out-of-process uploader at Snowflake. Column masking + retention policies applied. Flip the Options toggle ON for internal testers ONLY. | §10 checklist complete; 7 LIVE-PENDING SLOs updated to MEASURED in `docs/slo-report.md` |
+| **5. Learning loop** | §11.2 cross-episode mining; §11.3 Cortex Search over failure text feeding `/v1/enrich`. | §11.4 device-disposes test green: a hostile warehouse response cannot produce a `trusted` skill |
+| **6. Debt** | §7 splits; §5.3 dead-code removal; K7 regression guard. | `controller.ts` ≤ ~800 lines; zero symbols with tests and no callers |
+| **X. Tier 3** | **NOT SCHEDULED.** Requires a separate owner decision (§16). | — |
+
+Note: Phase 0 delivers more user-visible safety than Phases 3–5 combined. That ratio is
+intentional and is a direct consequence of the audit.
+
+
+================================================================================
+§15. WHAT THIS DOCUMENT DOES NOT CHANGE
+================================================================================
+
+  - The product concept, the action space (`shared/types.ts`), or the confirmation
+    grammar.
+  - PRD 5's security posture, in any direction. Every §13 gate tightens it.
+  - The frontend/backend key split.
+  - The local-first reasoning chain `ollama → openrouter → groq`.
+  - The honest limits in `ARCHITECTURE.md §7` (login-walled sites, no proven checkout,
+    small-model contract fragility). Fixing C4 and H1 improves reliability within those
+    limits; it does not remove them, and no analytics work will.
+  - Bilingual scope (EN + HI).
+
+
+================================================================================
+§16. OPEN DECISIONS FOR THE OWNER
+================================================================================
+
+| # | Question | Recommendation |
+|---|---|---|
+| Q1 | Is there a Snowflake account and budget, or is this a design study? | Determines Phases 4–5 entirely. Phases 0–3 are valuable with no account at all. |
+| Q2 | Is telemetry opt-in per user, or opt-in per install with an org-wide policy? | Per-user opt-in with an org kill-switch. Never opt-out. |
+| Q3 | Is the goal developer-facing (measure our SLOs) or product-facing (fleet learning)? | Both eventually, but Phase 3 should start developer-facing only — it is lower risk and immediately useful. |
+| Q4 | Multi-tenancy: one shared warehouse across users, or per-install? | One shared warehouse, strict host/hash-only dimensions, `GOAL_HASH` salted per install so cross-user linkage is impossible. |
+| Q5 | Retention window? | 90 days raw, 1 year aggregated. State it in the Options UI. |
+| Q6 | Tier 3 / MCP — ever? | Recommend **no**. See §12. |
+| Q7 | Is the existing dead MCP code deleted, or gated behind a real entry point? | Delete unless Q6 is yes. ~1000 lines + 428 lines of tests is a liability. |
+| Q8 | Do the 4 CRITICAL findings get a patch release before any new feature work? | **Yes.** A remote-exploitable gateway and a voice-phishing vector in a blind-user tool should not sit in a release while analytics are designed. |
+| Q9 | Should the voice-transcription path also emit latency telemetry to the warehouse (SLO 2)? | Yes in Tier 1 — it is the only way to see Whisper p95 across the fleet. Metadata only, no audio. |
+| Q10 | Governance posture for a project handling data from assistive-technology users? | This is a sensitive user population. Recommend an explicit written privacy policy and a DPIA-style review before Phase 4, not after. |
+
+---
+
+**End of PRD 8.**
+
+Verification note for an independent reviewer: every finding in §2 is reproducible from
+the file:line references given. The four CRITICAL findings were confirmed by direct
+source read; C1 additionally against `backend/src/http.ts:11-32` and `:70-72`, C2
+against `backend/src/routes/chat.ts:201` and `backend/src/ai/qwen-client.ts:404`, C3
+against `frontend/src/background/agent-controller/controller.ts:395-413` against
+`shared/constants.ts:129-137`, and C4 against `controller.ts:2145-2147` and
+`frontend/src/verification/verification-engine.ts:71-72`. H3 and H6 are additionally
+confirmed against the captured `backend/server-8787.err.log` output already committed to
+the repository.
