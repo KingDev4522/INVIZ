@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>INVIZ: navigate the web by voice</title>
+    <meta
+      name="description"
+      content="INVIZ is a Chrome extension and a local AI gateway that lets blind users operate the web by voice. It reads the page, follows spoken instructions, and asks before anything consequential."
+    />
+    <script>
+      document.documentElement.classList.add("js");
+      try {
+        var t = new URLSearchParams(location.search).get("theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.classList.add(t);
+          document.documentElement.style.colorScheme = t;
+        }
+      } catch (e) {}
+    </script>
+    <link
+      rel="preload"
+      href="./src/assets/fonts/geist-400.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link
+      rel="preload"
+      href="./src/assets/fonts/geist-600.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+  </head>
+  <body id="top">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
