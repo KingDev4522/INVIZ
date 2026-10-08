@@ -108,6 +108,8 @@ function describeProgress(event: AgentProgressEvent): { phase: VoicePhase; text:
       return { phase: "error", text: event.prompt ?? "That didn't work." };
     case "searching":
       return { phase: "thinking", text: "Searching the web…" };
+    case "speaking":
+      return { phase: "speaking", text: event.prompt ?? "Speaking…" };
     default:
       return { phase: "thinking", text: "Working…" };
   }

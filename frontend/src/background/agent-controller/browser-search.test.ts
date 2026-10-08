@@ -22,6 +22,7 @@ import {
   classifySearchIntent,
   extractBrowserSearchQuery,
   isSearchResultsUrl,
+  shouldPreferPageSearch,
   type PageSnapshotLike,
 } from "./controller.js";
 import { evaluate } from "../webguard/policy.js";
@@ -55,7 +56,23 @@ interface Built {
   reasonInputs: ReasonInput[];
 }
 
-function build(outcomes: AgentOutcome[], searchResults: SearchResultItem[] = []): Built {
+const YT_SNAPSHOT: PageSnapshotLike = {
+  url: "https://www.youtube.com/results?search_query=baby",
+  title: "baby - YouTube",
+  generation: 9,
+  items: [
+    { id: "e1", role: "searchbox", name: "Search", states: {}, fieldKind: "text", sensitive: false },
+    { id: "e2", role: "link", name: "Justin Bieber - Baby", states: {}, fieldKind: null, sensitive: false },
+    { id: "e3", role: "link", name: "Baby song remix", states: {}, fieldKind: null, sensitive: false },
+    { id: "e4", role: "link", name: "Baby lullaby", states: {}, fieldKind: null, sensitive: false },
+  ],
+};
+
+function build(
+  outcomes: AgentOutcome[],
+  searchResults: SearchResultItem[] = [],
+  opts: { tabUrl?: string; snapshot?: PageSnapshotLike } = {},
+): Built {
   const executed: string[] = [];
   const searches: string[] = [];
   const saved: TaskSnapshot[] = [];
@@ -64,6 +81,7 @@ function build(outcomes: AgentOutcome[], searchResults: SearchResultItem[] = [])
   const queue = [...outcomes];
   const controller = new AgentController({
     backend: { url: "http://127.0.0.1:8787" },
+    ...(opts.tabUrl !== undefined ? { getTabUrl: async () => opts.tabUrl as string } : {}),
     reason: async (input: ReasonInput) => {
       reasonInputs.push(input);
       const next = queue.shift();
@@ -95,7 +113,7 @@ function build(outcomes: AgentOutcome[], searchResults: SearchResultItem[] = [])
     speak: async () => undefined,
     stopAudio: async () => undefined,
     setAgentActive: async () => undefined,
-    loadSnapshot: async () => SNAPSHOT,
+    loadSnapshot: async () => opts.snapshot ?? SNAPSHOT,
     loadLayerB: async () => ({
       interpretation: "cached",
       pageGeneration: 7,
@@ -220,9 +238,12 @@ describe("PRD 6.10 fresh observation + verification (§10, §17, §18)", () => {
   });
 });
 
-describe("PRD 6.10 end-to-end controller flows (§23)", () => {
-  it("A1/A5: 'Search for Tesla' from an arbitrary page runs browser_search with Tavily = 0", async () => {
-    const built = build([]);
+describe("PRD 6.10 end-to-end controller flows — free will (model decides)", () => {
+  it("A1/A5: 'Search for Tesla' runs browser_search when the model chooses it, Tavily = 0", async () => {
+    const built = build([
+      { type: "action", action: { action: "browser_search", parameters: { query: "Tesla" } } },
+      { type: "task_complete" },
+    ]);
     await built.controller.routeVoice(voice("Search for Tesla."), 3);
     expect(built.executed).toContain("browser_search");
     expect(built.searches).toEqual([]);
@@ -230,20 +251,31 @@ describe("PRD 6.10 end-to-end controller flows (§23)", () => {
     expect(last?.searchMode).toBe("browser");
     expect(last?.lastVerifiedResult ?? "").toContain("browser search");
   });
-  it("A7: a model web_search for a browser goal is refused without spending Tavily", async () => {
+  it("A7: a model web_search is allowed by free will and spends Tavily (no intent refusal)", async () => {
+    const built = build(
+      [
+        { type: "task_complete" },
+      ],
+      [{ title: "Tesla", url: "https://example.com/tesla", snippet: "tesla" }],
+    );
+    // Directly drive a web_search outcome to prove free-will allowance.
+    // Route a research goal whose model proposes web_search.
+    const built2 = build(
+      [
+        { type: "action", action: { action: "web_search", parameters: { query: "Tesla" } } },
+        { type: "task_complete" },
+      ],
+    );
+    await built2.controller.routeVoice(voice("Search for Tesla."), 3);
+    expect(built2.searches).toEqual(["Tesla"]);
+    expect(built2.executed).not.toContain("browser_search");
+    void built;
+  });
+  it("12. search → website: after model browser search the task stays alive for grounded continuation", async () => {
     const built = build([
-      { type: "action", action: { action: "web_search", parameters: { query: "Tesla" } } },
+      { type: "action", action: { action: "browser_search", parameters: { query: "Tesla" } } },
       { type: "task_complete" },
     ]);
-    await built.controller.routeVoice(voice("Search for Tesla."), 3);
-    // Deterministic first-step browser_search runs before the model is asked;
-    // the queued model web_search (if ever proposed) would be refused. The
-    // deterministic path itself must never call Tavily.
-    expect(built.searches).toEqual([]);
-    expect(built.executed).toContain("browser_search");
-  });
-  it("12. search → website: after browser search the task stays alive for grounded continuation", async () => {
-    const built = build([{ type: "task_complete" }]);
     await built.controller.routeVoice(voice("Search for Tesla and open the official website."), 3);
     expect(built.executed[0]).toBe("browser_search");
     expect(built.searches).toEqual([]);
@@ -263,5 +295,68 @@ describe("PRD 6.10 end-to-end controller flows (§23)", () => {
     ]);
     await built.controller.routeVoice(voice("find me pizza"), 3);
     expect(built.searches).toEqual(["pizza"]);
+  });
+});
+
+describe("media-page guard helper (advisory only, model decides)", () => {
+  it("prefers page search on youtube/spotify with a media goal", () => {
+    expect(
+      shouldPreferPageSearch("https://www.youtube.com/results?search_query=baby", "Search for Baby song."),
+    ).toBe(true);
+    expect(
+      shouldPreferPageSearch("https://open.spotify.com/search/baby", "Play Baby by Justin Bieber."),
+    ).toBe(true);
+  });
+  it("stays browser search off media pages, for non-media goals, or unknown tabs", () => {
+    expect(shouldPreferPageSearch("https://www.google.com/", "Search for Baby song.")).toBe(false);
+    expect(shouldPreferPageSearch("https://www.youtube.com/", "Who is Tesla's CEO?")).toBe(false);
+    expect(shouldPreferPageSearch(null, "Search for Baby song.")).toBe(false);
+    expect(shouldPreferPageSearch("not a url", "Play Baby.")).toBe(false);
+  });
+  it("model decides on youtube: page interaction when it chooses page UI", async () => {
+    const built = build([{ type: "task_complete" }], [], {
+      tabUrl: "https://www.youtube.com/results?search_query=baby",
+      snapshot: YT_SNAPSHOT,
+    });
+    await built.controller.routeVoice(voice("Search for Baby song by Justin Bieber."), 3);
+    // Free will: no deterministic browser_search; the model completed without one.
+    expect(built.executed).not.toContain("browser_search");
+    expect(built.reasonInputs.length).toBeGreaterThan(0);
+  });
+  it("model decides off media pages: browser_search when it chooses it", async () => {
+    const built = build(
+      [
+        { type: "action", action: { action: "browser_search", parameters: { query: "Baby song" } } },
+        { type: "task_complete" },
+      ],
+      [],
+      { tabUrl: "https://www.google.com/search?q=baby" },
+    );
+    await built.controller.routeVoice(voice("Search for Baby song by Justin Bieber."), 3);
+    expect(built.executed).toContain("browser_search");
+  });
+  it("free-will YouTube flow: web_search extracts observed link, then navigates to it", async () => {
+    const searchResults = [
+      { title: "Baby - Justin Bieber - YouTube", url: "https://www.youtube.com/watch?v=kffacxfA7G4", snippet: "Baby official video" },
+    ];
+    const built = build(
+      [
+        { type: "action", action: { action: "web_search", parameters: { query: "Baby Justin Bieber YouTube" } } },
+        {
+          type: "action",
+          action: {
+            action: "navigate",
+            parameters: { url: "https://www.youtube.com/watch?v=kffacxfA7G4" },
+            expect: { type: "navigation_completed" },
+          },
+        },
+        { type: "task_complete", text: "Playing it." },
+      ],
+      searchResults,
+      { tabUrl: "https://www.google.com/", snapshot: YT_SNAPSHOT },
+    );
+    await built.controller.routeVoice(voice("play Baby song on YouTube"), 3);
+    expect(built.searches).toEqual(["Baby Justin Bieber YouTube"]);
+    expect(built.executed).toContain("navigate");
   });
 });

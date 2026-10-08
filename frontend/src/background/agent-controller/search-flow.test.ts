@@ -134,13 +134,13 @@ describe("model-driven web_search", () => {
     expect(built.navigated).toEqual(["https://example.com/2"]);
   });
 
-  it("refuses a navigational search (open-site goal) without spending Tavily", async () => {
+  it("allows a web_search for any goal by free will (no navigational refusal)", async () => {
     const built = build([
       { type: "action", action: { action: "web_search", parameters: { query: "youtube" } } },
       { type: "task_complete" },
     ]);
     await built.controller.routeVoice(voice("open youtube"), 3);
-    expect(built.searches).toEqual([]);
+    expect(built.searches).toEqual(["youtube"]);
   });
 
   it("refuses a duplicate search with the same query", async () => {

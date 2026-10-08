@@ -59,8 +59,8 @@ describe("SYSTEM_PROMPT_V2 states every outcome shape the validator accepts", ()
     // begin a line. A nested {"type":"element_present",...} inside an action's
     // expect clause is not an outcome type and must not be counted as one.
     const mentioned = SYSTEM_PROMPT_V2.split("\n")
-      .map((line) => /^\{"type":"([a-z_]+)"/.exec(line.trim())?.[1])
-      .filter((t): t is string => t !== undefined);
+      .map((line: string) => /^\{"type":"([a-z_]+)"/.exec(line.trim())?.[1])
+      .filter((t: string | undefined): t is string => t !== undefined);
     expect(mentioned.length).toBeGreaterThan(0);
     for (const type of mentioned) {
       expect(OUTCOME_TYPES).toContain(type);

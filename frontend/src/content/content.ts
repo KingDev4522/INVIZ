@@ -30,6 +30,20 @@ import type { Expectation } from "../../../shared/types.js";
 import { VoiceOverlay } from "./voice-overlay.js";
 import type { VoicePhase } from "../../../shared/voice-status.js";
 
+/**
+ * Frame guard: with `all_frames: true` this script runs in every iframe, but
+ * exactly ONE instance per tab may own the snapshot, the overlay, and message
+ * handling — the top frame. Subframes stay inert so snapshots never get
+ * clobbered by iframe content and actions never execute twice.
+ */
+function isTopFrame(): boolean {
+  try {
+    return window.top === window.self;
+  } catch {
+    return false;
+  }
+}
+
 const lens = new ContextLens();
 const pendingAnnouncements: Announcement[] = [];
 const MAX_PENDING = 20;
@@ -63,14 +77,18 @@ async function voicelensOn(): Promise<boolean> {
 function speakLive(text: string, lang: AnnounceLang): void {
   if (text.trim() === "") return;
   void voicelensOn().then((on) => {
-    if (!on) return;
-    chrome.runtime
-      .sendMessage({
-        type: "TTS_SPEAK",
-        requestId: `speak_${Date.now()}`,
-        payload: { text, lang, priority: 5 },
-      })
-      .catch(() => undefined);
+    if (!on || !contextAlive()) return;
+    try {
+      chrome.runtime
+        .sendMessage({
+          type: "TTS_SPEAK",
+          requestId: `speak_${Date.now()}`,
+          payload: { text, lang, priority: 5 },
+        })
+        .catch(() => undefined);
+    } catch {
+      contextDead = true;
+    }
   });
 }
 monitor.onAnnouncement((a) => {
@@ -118,6 +136,7 @@ const hoverCoalescer = new HoverCoalescer((el) => {
 document.addEventListener(
   "mouseover",
   (e: Event) => {
+    if (!isTopFrame()) return;
     if (!(e instanceof MouseEvent)) return;
     const target = deepHoverTarget(e);
     if (target === null) return;
@@ -126,7 +145,40 @@ document.addEventListener(
   true,
 );
 
+/**
+ * MV3 reality: reloading/updating the extension kills this script's extension
+ * context, but the script keeps running in the page. Every chrome.* call then
+ * throws "Extension context invalidated" SYNCHRONOUSLY — a `.catch()` on the
+ * returned promise never sees it, hence the uncaught-error spam. Guard once
+ * here: dead context → park the observers and go silent instead of throwing.
+ */
+let contextDead = false;
+function contextAlive(): boolean {
+  if (contextDead) return false;
+  try {
+    if (chrome?.runtime?.id === undefined) {
+      contextDead = true;
+      try {
+        observer.stop();
+      } catch {
+        // Already down.
+      }
+      try {
+        monitor.stop();
+      } catch {
+        // Already down.
+      }
+      return false;
+    }
+    return true;
+  } catch {
+    contextDead = true;
+    return false;
+  }
+}
+
 function pushSnapshot(): void {
+  if (!isTopFrame() || !contextAlive()) return;
   const state = lens.extract(document);
   const snapshot = {
     url: state.url,
@@ -140,15 +192,20 @@ function pushSnapshot(): void {
     skipped: state.skipped,
     savedAt: Date.now(),
   };
-  chrome.runtime
-    .sendMessage({
-      type: "PAGE_STATE_UPDATED",
-      requestId: `req_${Date.now()}`,
-      payload: { state: snapshot },
-    })
-    .catch(() => {
-      logger.debug("snapshot: service worker unavailable (extension reloading?)");
-    });
+  try {
+    chrome.runtime
+      .sendMessage({
+        type: "PAGE_STATE_UPDATED",
+        requestId: `req_${Date.now()}`,
+        payload: { state: snapshot },
+      })
+      .catch(() => {
+        logger.debug("snapshot: service worker unavailable (extension reloading?)");
+      });
+  } catch {
+    contextDead = true;
+    logger.debug("snapshot: extension context invalidated — parked until reload");
+  }
 }
 
 const observer = new PageObserver(document, {
@@ -184,19 +241,25 @@ function onTrustedUserInput(kind: string): void {
   if (now - lastOverrideSent < 1000) return; // debounce 1s
   lastOverrideSent = now;
   agentActive = false; // local halt until the worker re-arms or stands down
-  chrome.runtime
-    .sendMessage({
-      type: "USER_OVERRIDE",
-      requestId: `ovr_${now}`,
-      payload: { kind },
-    })
-    .catch(() => undefined);
+  if (!contextAlive()) return;
+  try {
+    chrome.runtime
+      .sendMessage({
+        type: "USER_OVERRIDE",
+        requestId: `ovr_${now}`,
+        payload: { kind },
+      })
+      .catch(() => undefined);
+  } catch {
+    contextDead = true;
+  }
 }
 
 for (const event of ["keydown", "click", "wheel"] as const) {
   document.addEventListener(
     event,
     (e: Event) => {
+      if (!isTopFrame()) return;
       if (e.isTrusted) onTrustedUserInput(event);
     },
     true,
@@ -459,10 +522,14 @@ function showVoiceStatus(payload: Record<string, unknown>): void {
 
 // --- Wiring -------------------------------------------------------------------
 
-pushSnapshot();
-monitor.start();
-observer.start();
-logger.info("content script wired (Phase 1+5)", { url: location.href });
+if (isTopFrame()) {
+  pushSnapshot();
+  monitor.start();
+  observer.start();
+  logger.info("content script wired (Phase 1+5)", { url: location.href });
+} else {
+  logger.debug("content script parked (subframe; top frame owns the tab)");
+}
 
 chrome.runtime.onMessage.addListener(
   (
@@ -470,6 +537,9 @@ chrome.runtime.onMessage.addListener(
     _sender: chrome.runtime.MessageSender,
     sendResponse: (response: unknown) => void,
   ): boolean => {
+    // Subframes never handle messages: with all_frames the top frame alone
+    // owns execution/observation, so actions can never run twice per tab.
+    if (!isTopFrame()) return false;
     if (!isExtensionMessage(message)) {
       sendResponse({ ok: false, errorCode: "SCHEMA_VALIDATION_FAILED" });
       return false;

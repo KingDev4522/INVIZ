@@ -296,6 +296,11 @@ export interface InteractiveSet {
  * visual order is approximately preserved). Closed shadow roots are
  * unreachable by design and stay invisible — same as assistive technology.
  *
+ * Same-origin iframes/frames are descended into as well: their controls are
+ * real, clickable elements in this tab (embeds, same-origin widgets). Reading
+ * `contentDocument` on a cross-origin frame throws — caught and skipped, same
+ * as assistive technology, which also cannot cross that boundary.
+ *
  * Why this exists: component frameworks mount their controls inside shadow
  * DOM. A flat document.querySelectorAll sees the page chrome but none of
  * the shadow content, leaving contextual actions with no target.
@@ -306,7 +311,10 @@ export function queryDeep(
   stats?: { pierced: number },
 ): Element[] {
   const out: Element[] = [];
+  const seen = new Set<ParentNode>();
   const walk = (node: ParentNode): void => {
+    if (seen.has(node)) return;
+    seen.add(node);
     node.querySelectorAll(selector).forEach((el) => {
       out.push(el);
     });
@@ -319,6 +327,17 @@ export function queryDeep(
         if (stats !== undefined) stats.pierced += 1;
         walk(shadow);
       }
+    });
+    // Descend into same-origin frames. Cross-origin access throws on
+    // `contentDocument` and is skipped — never breaks extraction.
+    node.querySelectorAll("iframe,frame").forEach((el) => {
+      let inner: Document | null = null;
+      try {
+        inner = (el as HTMLIFrameElement).contentDocument ?? null;
+      } catch {
+        inner = null;
+      }
+      if (inner !== null) walk(inner);
     });
   };
   walk(root);

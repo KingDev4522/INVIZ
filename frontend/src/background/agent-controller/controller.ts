@@ -252,6 +252,7 @@ export interface AgentProgressEvent {
     | "started"
     | "step"
     | "searching"
+    | "speaking"
     | "waiting-answer"
     | "waiting-confirm"
     | "done"
@@ -307,13 +308,13 @@ function trimProse(
 }
 
 /**
- * Sparse-AX gate for the P0-1 vision fallback (sparse-trigger only).
+ * Snapshot density assessment for hybrid-vision logging.
  *
  * A step is sparse when the AX registry alone is unlikely to ground an
  * action: almost no targets, or most targets unnamed (icon-only controls the
- * model cannot distinguish). Either condition triggers — no site-specific
- * logic, just counts. Thresholds are conservative so ordinary pages
- * (dozens of named controls) never pay for a capture.
+ * model cannot distinguish). Diagnostic only — hybrid mode attaches the
+ * screenshot on every step regardless; the reason is logged so you can see
+ * which steps needed vision most. No site-specific logic, just counts.
  */
 export const SPARSE_MAX_ITEMS = 8;
 export const SPARSE_UNNAMED_FRACTION = 0.5;
@@ -458,6 +459,49 @@ export function resolveOpenSitePrefix(goal: string): { url: string; rest: string
   return { url, rest };
 }
 
+/** Allowlist keys usable as in-goal site anchors (single letters excluded). */
+const SITE_ANCHOR_NAMES: ReadonlyArray<{ names: readonly string[]; key: string }> = [
+  { names: ["youtube", "youtu"], key: "youtube" },
+  { names: ["github"], key: "github" },
+  { names: ["twitter"], key: "twitter" },
+  { names: ["google"], key: "google" },
+  { names: ["reddit"], key: "reddit" },
+  { names: ["wikipedia"], key: "wikipedia" },
+];
+
+/**
+ * Site-anchored goals ("play Baby on YouTube", "open a video on YouTube").
+ *
+ * The destination/prefix resolvers only match goals that START with an
+ * open-site command, so a goal naming the site anywhere else fell to the
+ * model — which is forbidden from inventing URLs and asked the USER to open
+ * the site instead. For a blind user that is the product failing. When the
+ * goal names an allowlisted site and the live tab is not already there,
+ * return the frozen homepage URL so the controller navigates
+ * deterministically and the task stays alive for the FULL goal. Returns null
+ * when no site is named, the tab is already there, or the URL is unknown
+ * (previous behavior). Exported for unit tests.
+ */
+export function resolveSiteAnchor(goal: string, liveUrl: string | null): string | null {
+  if (liveUrl === null || liveUrl === "") return null;
+  const text = goal.toLowerCase();
+  for (const { names, key } of SITE_ANCHOR_NAMES) {
+    const named = names.some((name) => new RegExp(`\\b${name}\\b`, "i").test(text));
+    if (!named) continue;
+    const destination = OPEN_SITE_ALLOWLIST[key];
+    if (destination === undefined) continue;
+    try {
+      const liveHost = new URL(liveUrl).hostname.toLowerCase();
+      const destHost = new URL(destination).hostname.toLowerCase();
+      if (liveHost === destHost || liveHost.endsWith(`.${destHost}`)) return null;
+    } catch {
+      return null;
+    }
+    return destination;
+  }
+  return null;
+}
+
 // --- PRD 6.10: search taxonomy -----------------------------------------------
 /**
  * Search intent taxonomy (PRD 6.10 §4–§5):
@@ -483,6 +527,40 @@ const SITE_SEARCH_RE =
   /\bsearch\b\s*(?:on|in|within)?\s*(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b/i;
 const SITE_SEARCH_FOR_RE =
   /\bsearch\b\s+(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\s+for\b/i;
+/**
+ * Generic site vocabulary for search routing. These are allowlisted site
+ * tokens only — never song, video, or query content (no hardcoding).
+ */
+const SITE_NAME_RE =
+  /\b(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b/i;
+/** "on YouTube" / "in Spotify" — site anchor phrase anywhere in the goal. */
+const SITE_ANCHOR_PHRASE_RE =
+  /\b(?:on|in|inside|within)\s+(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b/i;
+/** Leading browser-search verb ("search for", "search", "google", "look up"). */
+const LEADING_SEARCH_VERB_RE = /^(?:please\s+)?(?:search\s+for|search|google|look\s*up)\b\s*/i;
+
+/**
+ * True when the goal is a site-anchored search with natural wording the
+ * strict adjacent-token patterns miss: "search any song on YouTube",
+ * "search for the baby song on YouTube and play it",
+ * "search baby song on YouTube". Generic: requires the SEARCH verb plus a
+ * site anchor — either an "on/in <site>" phrase anywhere, or a site token
+ * beyond the leading verb ("search baby youtube" but NOT the verb itself in
+ * "Google Tesla"). No query content is examined, so no song is hardcoded.
+ * Exported for unit tests.
+ */
+export function isSiteAnchoredSearch(goal: string): boolean {
+  const text = goal.trim();
+  if (text === "") return false;
+  if (!/\bsearch\b/i.test(text)) return false;
+  if (SITE_ANCHOR_PHRASE_RE.test(text)) return true;
+  const withoutVerb = text.replace(LEADING_SEARCH_VERB_RE, "");
+  // The verb itself ("Google Tesla") must not count as the site mention.
+  if (withoutVerb === text) {
+    return SITE_NAME_RE.test(text);
+  }
+  return SITE_NAME_RE.test(withoutVerb);
+}
 
 /** Bare browser-search commands: "search [for] X", "google X", "look up X". */
 const BROWSER_SEARCH_RE =
@@ -501,13 +579,17 @@ const RESEARCH_QUESTION_RE =
 export function classifySearchIntent(goal: string): SearchIntent {
   const text = goal.trim();
   if (text === "") return "none";
-  // Page/site search wins over browser: "Search YouTube for Baby" and
-  // "Search this website for Tesla" start with "search" but mean the
-  // current page's UI, not the browser engine (§4–§5, §13).
+  // Page/site search wins over browser: "Search YouTube for Baby",
+  // "search any song on YouTube and play it", and
+  // "Search this website for Tesla" all mean the named/current site's own
+  // search UI, not the browser engine (§4–§5, §13). The generic
+  // site-anchored check covers natural "search <query> on <site>" wording
+  // without hardcoding any query content.
   if (
     PAGE_SEARCH_RE.test(text) ||
     SITE_SEARCH_FOR_RE.test(text) ||
-    SITE_SEARCH_RE.test(text)
+    SITE_SEARCH_RE.test(text) ||
+    isSiteAnchoredSearch(text)
   ) {
     return "page";
   }
@@ -517,6 +599,53 @@ export function classifySearchIntent(goal: string): SearchIntent {
   }
   if (RESEARCH_QUESTION_RE.test(text)) return "web_research";
   return "none";
+}
+
+/** Hostname parts identifying media pages with their own search UI. */
+const MEDIA_PAGE_HOSTS = [
+  "youtube",
+  "youtu",
+  "vimeo",
+  "dailymotion",
+  "twitch",
+  "tiktok",
+  "netflix",
+  "hotstar",
+  "spotify",
+  "soundcloud",
+  "music",
+] as const;
+
+/** Media verbs: the goal wants playback, so a media page's own search box wins. */
+const MEDIA_GOAL_VERBS_RE =
+  /\b(play|playing|watch|watching|listen|listening|song|songs|music|video|videos|movie|movies|trailer|episode|pause|resume|podcast)\b/i;
+
+/**
+ * Page-aware guard for the deterministic step-0 browser search.
+ *
+ * `classifySearchIntent` reads the goal text only, so standing on youtube.com
+ * saying "search Baby song" classifies `browser` — and firing browser_search
+ * there navigates the media tab AWAY to Google, stranding every ref and making
+ * the follow-up "play the 3rd video" click a random result. When the live tab
+ * is already a media page AND the goal wants media, the page's own search UI
+ * is the correct capability: skip the deterministic search and let the normal
+ * snapshot→reason loop drive the page. Unknown/absent URL (tests, closed tabs)
+ * keeps the previous behavior. Exported for unit tests.
+ */
+export function shouldPreferPageSearch(tabUrl: string | null, goal: string): boolean {
+  if (tabUrl === null) return false;
+  let host = "";
+  try {
+    host = new URL(tabUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const parts = host.split(".");
+  const isMediaPage = parts.some(
+    (part) => (MEDIA_PAGE_HOSTS as readonly string[]).includes(part),
+  );
+  if (!isMediaPage) return false;
+  return MEDIA_GOAL_VERBS_RE.test(goal);
 }
 
 /**
@@ -544,15 +673,77 @@ export function extractBrowserSearchQuery(goal: string): string {
 }
 
 /**
- * True when a URL looks like a search-results page (generic: any engine's
- * ?q=/query=/text=/search= param or a /search path). Used to verify that a
+ * Extracts the site-search query from a site-anchored goal without hardcoding
+ * any song, video, or title ("search <query> on <site> and play it" →
+ * "<query>"). Generic stripping only: leading action verbs (search/play/
+ * watch/listen), trailing multi-step continuations ("and play/open/..."),
+ * site-anchor phrases ("on YouTube", "YouTube for"), and bare site tokens.
+ * Preserves the user's wording for the visible search box; returns "" when
+ * nothing remains. Exported for unit tests.
+ */
+export function extractSiteSearchQuery(goal: string): string {
+  let text = goal.trim().replace(/[?.!\s]+$/u, "");
+  text = text.replace(/^(?:please\s+)/i, "");
+  // Leading action verbs (search family + playback family + open family).
+  text = text.replace(
+    /^(?:search\s+for|search|google|look\s*up|play|watch|listen\s+to|listen|open|go\s+to|goto|launch|visit)\b\s*/i,
+    "",
+  );
+  // Multi-step continuation ("... and play it", "... and open ..."): the
+  // search query is the FIRST clause.
+  const continuation = text.search(
+    /\s+and\s+(?:open|play|click|go\s+to|show|select|visit|watch|listen)\b/i,
+  );
+  if (continuation !== -1) text = text.slice(0, continuation);
+  // Trailing playback tail without "and" ("play baby song", "baby song play").
+  text = text.replace(/\s+(?:play|watch|listen)(?:\s+it)?\s*$/i, "");
+  // Site-anchor phrases: "on YouTube", "in Spotify", "YouTube for ...".
+  text = text.replace(
+    /\b(?:on|in|inside|within)\s+(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b/gi,
+    " ",
+  );
+  text = text.replace(
+    /^(?:youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\s+for\s+/i,
+    "",
+  );
+  // Bare leading/trailing site tokens ("YouTube Baby" → "Baby",
+  // "baby song youtube" → "baby song").
+  text = text.replace(
+    /^(?:youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b\s*/i,
+    "",
+  );
+  text = text.replace(
+    /\s*\b(?:youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b\s*$/i,
+    "",
+  );
+  // Filler "by" phrasing ("baby by justin bieber" → "baby justin bieber").
+  text = text.replace(/\s+by\s+/gi, " ");
+  // Filler articles/quantifiers at the start are kept — they are the user's
+  // words for the visible box — but collapse whitespace.
+  text = text.replace(/\s+/gu, " ").trim();
+  // "any song" alone is not a searchable title; keep it so the page still
+  // shows visible results rather than asking with no observation.
+  if (text.length > 400) text = text.slice(0, 400).trimEnd();
+  return text;
+}
+
+/**
+ * True when a URL looks like a search-results page (generic: any site's
+ * search/query param — including compound names like search_query — or a
+ * /search or /results path with a query string). Used to verify that a
  * browser search actually landed on results (PRD 6.10 §18) without any
  * engine-specific selectors (§G6). Exported for unit tests.
  */
 export function isSearchResultsUrl(url: string): boolean {
   const lowered = url.toLowerCase();
   if (/[?&](q|query|text|search|keyword|keywords)=/.test(lowered)) return true;
+  // Generic compound params ("search_query", "search-query", "searchText", …)
+  // used by site-internal search boxes — matched by substring, never by site.
+  if (/[?&][^&#?]*(search|query)[^&#?]*=/.test(lowered)) return true;
   if (/\/search(\/|$|\?|#)/.test(lowered)) return true;
+  // Generic results path WITH a query string (e.g. "/results?search_query=x"
+  // on media sites). Bare "/results" without "?" stays false.
+  if (/\/results(\/|$|\?|#)/.test(lowered) && lowered.includes("?")) return true;
   return false;
 }
 
@@ -572,13 +763,57 @@ const NAVIGATIONAL_GOAL_RE =
   /^(?:please\s+)?(?:open|go to|goto|launch|visit|take me to|show me)\b/i;
 
 /**
+ * True when the goal wants an article opened via search ("open a science
+ * article", "find a space article and open it"). Generic: requires the word
+ * "article" plus an open-like verb, excluding current-page reads ("read this
+ * article", "summarize this article"). No topic is examined, so no subject
+ * is hardcoded. Exported for unit tests.
+ */
+export function isArticleOpenGoal(goal: string): boolean {
+  const text = goal.trim();
+  if (text === "") return false;
+  if (!/\barticle\b/i.test(text)) return false;
+  // Current-page reads refer to the already-open page, never search+open.
+  if (/\b(this|that|current)\s+article\b/i.test(text)) return false;
+  return /\b(open|show|find|get|give|read|search|need|want|load)\b/i.test(text);
+}
+
+/**
+ * Extracts the web-search query for an article-open goal without hardcoding
+ * any topic ("open a science article" → "a science article", "find a space
+ * article about black holes and open it" → "a space article about black
+ * holes"). Generic stripping only: leading action verbs, leading "me/for me",
+ * trailing multi-step continuations. Keeps the "article" word so the search
+ * favors articles. Returns "" when nothing remains. Exported for unit tests.
+ */
+export function extractArticleQuery(goal: string): string {
+  let text = goal.trim().replace(/[?.!\s]+$/u, "");
+  text = text.replace(/^(?:please\s+)/i, "");
+  text = text.replace(
+    /^(?:open|show(?:\s+me)?|find|get|give(?:\s+me)?|read|search(?:\s+for)?|google|look\s*up|need|want|i\s+want)\b\s*/i,
+    "",
+  );
+  text = text.replace(/^(?:me|for\s+me)\b\s*/i, "");
+  const continuation = text.search(
+    /\s+and\s+(?:open|read|show|click|go\s+to|select|visit)\b/i,
+  );
+  if (continuation !== -1) text = text.slice(0, continuation);
+  text = text.replace(/\s+/gu, " ").trim();
+  if (text.length > 400) text = text.slice(0, 400).trimEnd();
+  return text;
+}
+
+/**
  * True when a web_search is a navigational request in disguise: the goal
  * itself is "open/go to X" and the query is just the site name (or names an
  * allowlisted site). The model must navigate directly instead of spending a
- * Tavily credit to find a homepage it already knows. Exported for unit tests.
+ * Tavily credit to find a homepage it already knows. Article opens ("open a
+ * science article") always need search — there is no known URL — so they are
+ * never navigational refusals. Exported for unit tests.
  */
 export function isNavigationalSearchRefusal(goal: string, query: string): boolean {
   if (!NAVIGATIONAL_GOAL_RE.test(goal.trim())) return false;
+  if (isArticleOpenGoal(goal)) return false;
   const normalized = normalizeSearchQuery(query);
   if (normalized === "") return false;
   if (normalized.split(" ").length <= 2) return true;
@@ -758,6 +993,14 @@ export class AgentController {
    * finish/cancel — a new task always asks again.
    */
   private approvals = new Map<string, Set<string>>();
+  /**
+   * taskId -> URLs the model has actually observed this task (memory only,
+   * never persisted). Sources: web_search results and fresh page snapshots.
+   * Used for generic anti-hallucination grounding: a navigate/open_tab to a
+   * URL never observed is refused with guidance to search first, then navigate
+   * to an observed URL. No allowlists, no topics — purely what was seen.
+   */
+  private observedUrls = new Map<string, Set<string>>();
   // taskId -> page generation whose enrichment already failed. Stops a failed
   // advisory call from being retried on every step of the same task, which
   // doubled Qwen usage and triggered provider rate limits mid-turn.
@@ -1174,110 +1417,58 @@ export class AgentController {
       return;
     }
 
-    // Deterministic open-site navigation (first step of a fresh task only).
-    // Safe to run even on restricted surfaces (chrome://, about:blank, or un-injected tabs)
-    // because navigation uses chrome.tabs.update which needs NO prior page snapshot.
-    if (task.currentStep === 0 && task.lastVerifiedResult === null) {
-      const destination = resolveOpenSiteDestination(task.goal);
-      if (destination !== null) {
-        const dummySnapshot: PageSnapshotLike = {
-          url: "about:blank",
-          title: "",
-          generation: 0,
-          items: [],
-        };
-        await this.doAction(
-          {
-            action: "navigate",
-            parameters: { url: destination },
-            expect: { type: "navigation_completed" },
-          },
-          task,
-          dummySnapshot,
-          tabId,
-          store,
-          { sensitiveAuthorized: false, confirmed: false },
-        );
-        return;
-      }
-      // Compound goal ("open YouTube and play lofi", "open Twitter and write a post"):
-      // deterministic first navigation, then the run loop continues over the fresh page.
-      const prefixed = resolveOpenSitePrefix(task.goal);
-      if (prefixed !== null) {
-        const dummySnapshot: PageSnapshotLike = {
-          url: "about:blank",
-          title: "",
-          generation: 0,
-          items: [],
-        };
-        await this.doAction(
-          {
-            action: "navigate",
-            parameters: { url: prefixed.url },
-            expect: { type: "navigation_completed" },
-          },
-          task,
-          dummySnapshot,
-          tabId,
-          store,
-            { sensitiveAuthorized: false, confirmed: false },
-        );
-        return;
-      }
-      // PRD 6.10 deterministic browser search (first step of a fresh task).
-      // "Search for Tesla" performs a browser-level search from the
-      // ALREADY-OPEN page — no prior Google navigation required (A5). Like
-      // open-site navigation it runs before snapshot acquisition: the search
-      // executes in the tab via chrome.search/tabs.update, and the loop then
-      // re-observes the fresh results page. Compound goals ("Search Tesla
-      // and open the official website") search first; the model grounds the
-      // follow-up navigation from the fresh results observation.
-      if (classifySearchIntent(task.goal) === "browser") {
-        const query = extractBrowserSearchQuery(task.goal);
-        if (query !== "") {
-          const dummySnapshot: PageSnapshotLike = {
-            url: "about:blank",
-            title: "",
-            generation: 0,
-            items: [],
-          };
-          await this.doBrowserSearch(
-            { action: "browser_search", parameters: { query } },
-            task,
-            dummySnapshot,
-            tabId,
-            store,
-          );
-          return;
-        }
-      }
-    }
+    // Free-will reasoning: no deterministic first-step bypasses.
+    // The model always reasons first from a fresh snapshot and decides itself
+    // whether to interact with the page, browser_search, web_search, navigate,
+    // or answer. Former hardcoded shortcuts (open-site allowlist navigation,
+    // site-anchor navigation, deterministic browser_search, article fast-path,
+    // page-search hints) are intentionally NOT executed here — they remain as
+    // exported pure helpers for advisory/telemetry use only, never as gates.
+    // Safety (WebGuard, schema validation, budgets, verification) still runs
+    // on whatever the model emits; anti-hallucination grounding (observed URLs
+    // and registry ids) is enforced downstream, not by task hardcoding.
 
     // CURRENT-PAGE acquisition: the already-open tab IS the context. Never
     // require a prior navigate / "open X" — pull fresh when storage is
     // missing, empty (SPA pre-render), or URL-mismatched (tab switched).
-    const snapshot = await this.ensureCurrentSnapshot(tabId, task.taskId);
-    if (snapshot === null) {
-      // No snapshot even after pull: content script unreachable on this tab.
-      await this.finish(task, "FAILED", "CANNOT_ACCESS_PAGE", tabId, store);
-      return;
-    }
-    // Unsupported scheme (chrome://, chrome-extension://, about:, edge://, view-source:, file:)
-    if (/^(chrome|chrome-extension|about|edge|view-source|file):/i.test(snapshot.url)) {
-      await this.finish(task, "FAILED", "UNSUPPORTED_PAGE", tabId, store);
-      return;
+    // Free-will fix: a missing snapshot must NOT fast-fail with
+    // CANNOT_ACCESS_PAGE before the model ever gets to think. Search/open
+    // goals (news articles, YouTube videos) need web_search + navigate first,
+    // which require no page registry. So proceed with an empty page context
+    // and let the model decide; target-bearing actions will still fail
+    // honestly via WebGuard when there is truly nothing to act on.
+    const loaded = await this.ensureCurrentSnapshot(tabId, task.taskId);
+    const snapshotMissing = loaded === null;
+    const snapshot: PageSnapshotLike =
+      loaded ?? ({ url: "", title: "", generation: 0, items: [] } as PageSnapshotLike);
+    if (!snapshotMissing) {
+      // Unsupported scheme (chrome://, chrome-extension://, about:, edge://, view-source:, file:)
+      if (/^(chrome|chrome-extension|about|edge|view-source|file):/i.test(snapshot.url)) {
+        await this.finish(task, "FAILED", "UNSUPPORTED_PAGE", tabId, store);
+        return;
+      }
+      // The current page itself is observed evidence for grounding.
+      if (snapshot.url.trim() !== "") this.rememberObservedUrls(task.taskId, [snapshot.url]);
+    } else {
+      logger.warn("agent: no current-page snapshot; reasoning with empty page context", {
+        taskId: task.taskId,
+        tabId,
+      });
     }
 
     // Enrichment when Layer B is missing/stale (async page prep, PRD 6.4 §1.4).
     // Runs through the backend /v1/enrich contract (default) or an injected
     // implementation in tests. Advisory only — failure proceeds on Layer A.
+    // Skipped when there is no page at all (empty context): enriching ""
+    // only burns a backend call and delays web_search/navigate.
     const loadLayerB = this.deps.loadLayerB ?? (async () => null);
     const saveLayerB = this.deps.saveLayerB ?? (async () => undefined);
     let layerB = await loadLayerB(tabId);
     if (
-      layerB === null ||
-      layerB.pageGeneration !== snapshot.generation ||
-      needsRefresh("route", layerB, snapshot.generation, this.now())
+      !snapshotMissing &&
+      (layerB === null ||
+        layerB.pageGeneration !== snapshot.generation ||
+        needsRefresh("route", layerB, snapshot.generation, this.now()))
     ) {
       // Already tried and failed for this page generation in this task.
       const suppressed = this.enrichSuppressed.get(task.taskId);
@@ -1322,16 +1513,17 @@ export class AgentController {
       }
     }
 
-    // --- P0-1 sparse vision fallback (CONTEXT_MODE=hybrid; default OFF) ----
+    // --- Hybrid vision (CONTEXT_MODE=hybrid; default OFF) ----
     // AX-first, always: the full AX text below is the reasoning context on
-    // every step. On SPARSE steps only (few targets or mostly unnamed
-    // controls), the viewport screenshot is ATTACHED alongside it — never a
-    // registry swap. The image carries layout only; eNN ids stay the sole
-    // executable targets (WebGuard/registry untouched).
+    // every step, and eNN ids stay the sole executable targets
+    // (WebGuard/registry untouched) — pixels can never authorize or address an
+    // action, they only help the model READ canvas-heavy pages. In hybrid
+    // mode the viewport screenshot is ATTACHED on every step alongside the
+    // full AX text — never a registry swap.
     //
     // Local-only: the backend forwards images to the local provider and drops
     // them on cloud fallback, so attaching here can never leak pixels to a
-    // hosted provider. Every capture failure degrades to text-only.
+    // hosted provider. Every capture failure degrades to DOM text-only.
     const sparsity = assessSnapshotSparsity(snapshot.items);
     const sparseTurnId = this.taskTurns.get(task.taskId);
     logger.info("agent: vision fallback check", {
@@ -1362,7 +1554,6 @@ export class AgentController {
     const textTokens = packed.estimatedTokens;
     let hybridImage: HybridScreenshot | undefined;
     if (
-      sparsity.sparse &&
       this.deps.contextMode === "hybrid" &&
       this.deps.captureScreenshot !== undefined
     ) {
@@ -1595,48 +1786,17 @@ export class AgentController {
       await this.afterFailure(task, snapshot, tabId, store, speak);
       return;
     }
-    // Deterministic search-need gate (Tavily costs 1 credit/search): the
-    // prompt already orders page-first → navigate-direct → single search, and
-    // this enforces it so a vigorous model cannot spend the budget on
-    // navigational, duplicate, or unbounded searches. Refusals never call
-    // Tavily; the next reasoning step sees the refusal as its observation.
+    // Free-will search gate: only generic budget/duplicate guards remain.
+    // The model decides itself whether web_search, browser_search, page
+    // interaction, or direct navigation fits the goal — no intent-based or
+    // navigational refusals. Former hardcoded refusals (browser/page intent,
+    // navigational) are intentionally removed so e.g. "play X on YouTube" can
+    // web_search, extract the observed YouTube link, and play it.
     const normalizedQuery = normalizeSearchQuery(query);
     const searchedQueries = task.searchedQueries ?? [];
     const searchesSpent = task.searchCount ?? 0;
     const turnForRefusal = this.taskTurns.get(task.taskId);
-    // PRD 6.10 §4/§14 web-research guard: the word "search" alone must never
-    // trigger Tavily. Browser-search and page-search goals use the browser /
-    // current-page capabilities — web_search (Tavily) is refused so acceptance
-    // tests observe Tavily = 0 (A1/A3/A5/A7). The refusal text steers the next
-    // reasoning step toward the correct capability.
-    const goalIntent = classifySearchIntent(task.goal);
-    if (goalIntent === "browser" || goalIntent === "page") {
-      task.recoveryAttempts += 1;
-      task.lastVerifiedResult =
-        goalIntent === "browser"
-          ? "web search refused: browser-search request — use the browser_search action (browser-level search) instead of web_search"
-          : "web search refused: page-search request — use the current page's search UI (type into its search control) instead of web_search";
-      await store.save(task);
-      logger.warn("agent: web search refused (search intent is not web research)", {
-        taskId: task.taskId,
-        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
-        intent: goalIntent,
-        query: query.slice(0, 120),
-      });
-      return;
-    }
-    if (isNavigationalSearchRefusal(task.goal, query)) {
-      task.recoveryAttempts += 1;
-      task.lastVerifiedResult =
-        "web search refused: navigational request — navigate directly to the site instead of searching";
-      await store.save(task);
-      logger.warn("agent: web search refused (navigational)", {
-        taskId: task.taskId,
-        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
-        query: query.slice(0, 120),
-      });
-      return;
-    }
+    void turnForRefusal;
     if (searchedQueries.includes(normalizedQuery)) {
       task.recoveryAttempts += 1;
       task.lastVerifiedResult = `web search refused: "${query}" was already searched — answer from the earlier observations or navigate to one of their URLs`;
@@ -1716,9 +1876,17 @@ export class AgentController {
               query,
               strategies: webStrategies,
             };
+      // Free-will grounding: every returned URL becomes observed evidence
+      // for this task. A later navigate must use an observed URL — e.g. a
+      // YouTube video link extracted from these results — never an invented one.
+      this.rememberObservedUrls(
+        task.taskId,
+        results.map((r) => r.url),
+      );
       task.lastVerifiedResult =
         `web search for "${query}": ${lines.join(" | ")} ` +
-        `[result types: ${resultTypes.join(", ")}]. ${webRouting.directive}`;
+        `[result types: ${resultTypes.join(", ")}]. ${webRouting.directive} ` +
+        `Only navigate to a URL from these observed results — never invent one.`;
       await store.save(task);
       const spoken = results
         .slice(0, 3)
@@ -1830,21 +1998,28 @@ export class AgentController {
     this.recorder.recordOutcome(task.taskId, outcome);
     switch (outcome.type) {
       case "answer":
+        // Mirror the spoken text to the on-screen overlay in the same moment
+        // it starts speaking, so the user reads what the model just produced.
+        this.emitProgress({ taskId: task.taskId, kind: "speaking", prompt: outcome.text ?? "" });
         await speak(outcome.text ?? "", task.goalLang, 4);
         await this.finish(task, "COMPLETE", null, tabId, store);
         return;
       case "task_complete":
         this.consecutiveAsk.delete(task.taskId);
         if (outcome.text !== undefined && outcome.text !== "") {
+          this.emitProgress({ taskId: task.taskId, kind: "speaking", prompt: outcome.text });
           await speak(outcome.text, task.goalLang, 4);
         }
         await this.finish(task, "COMPLETE", null, tabId, store);
         return;
-      case "cannot_complete":
+      case "cannot_complete": {
         this.consecutiveAsk.delete(task.taskId);
-        await speak(outcome.reason ?? getErrorSpeech("ACTION_FAILED", langOf(task)), task.goalLang, 3);
+        const reason = outcome.reason ?? getErrorSpeech("ACTION_FAILED", langOf(task));
+        this.emitProgress({ taskId: task.taskId, kind: "speaking", prompt: reason });
+        await speak(reason, task.goalLang, 3);
         await this.finish(task, "FAILED", null, tabId, store);
         return;
+      }
       case "ask_user": {
         if (outcome.question === undefined) {
           await this.finish(task, "FAILED", "AI_SERVICE_UNAVAILABLE", tabId, store);
@@ -2494,6 +2669,45 @@ export class AgentController {
     }
   }
 
+  /**
+   * Generic anti-hallucination grounding (no task hardcoding).
+   * Normalizes URLs for observed-vs-proposed comparison: case-folded,
+   * trailing-slash-insensitive, fragment-free. Query strings are preserved
+   * (video/article ids live there).
+   */
+  private normalizeObservedUrl(url: string): string {
+    const trimmed = url.trim();
+    if (trimmed === "") return "";
+    try {
+      const parsed = new URL(trimmed);
+      parsed.hash = "";
+      let out = parsed.toString();
+      if (out.endsWith("/") && parsed.pathname === "/") out = out.slice(0, -1);
+      return out.toLowerCase();
+    } catch {
+      return trimmed.toLowerCase().replace(/#.*$/, "").replace(/\/+$/, "");
+    }
+  }
+
+  private rememberObservedUrls(taskId: string, urls: string[]): void {
+    if (urls.length === 0) return;
+    let set = this.observedUrls.get(taskId);
+    if (set === undefined) {
+      set = new Set<string>();
+      this.observedUrls.set(taskId, set);
+    }
+    for (const url of urls) {
+      const norm = this.normalizeObservedUrl(url);
+      if (norm !== "") set.add(norm);
+    }
+  }
+
+  private isUrlObserved(taskId: string, url: string): boolean {
+    const norm = this.normalizeObservedUrl(url);
+    if (norm === "") return false;
+    return this.observedUrls.get(taskId)?.has(norm) === true;
+  }
+
   private async doAction(
     action: StructuredAction,
     task: TaskSnapshot,
@@ -2503,6 +2717,50 @@ export class AgentController {
     opts: { sensitiveAuthorized: boolean; confirmed: boolean },
   ): Promise<void> {
     const speak = this.deps.speak ?? (async () => undefined);
+    // Generic anti-hallucination grounding for navigation (no task hardcoding):
+    // a navigate/open_tab to a deep URL never observed via web_search results
+    // or the current page is refused — the model must first think (search),
+    // then use an observed link (e.g. extract the YouTube video link from
+    // web_search results and navigate to it). Observed URLs and same-page
+    // reloads always pass. Explicit homepage navigations (path "/" with the
+    // host named in the goal, e.g. "open YouTube" → youtube.com/) also pass:
+    // the destination comes from the user's own words, not invention. Deep
+    // links (paths, video ids, article slugs) always need prior observation.
+    // Trusted skill procedures (URL built from validated skill inputs) bypass
+    // this check: the registry validated the inputs, not the model inventing.
+    if ((action.action === "navigate" || action.action === "open_tab") && !this.activeSkills.has(task.taskId)) {
+      const params = action.parameters as { url?: unknown } | undefined;
+      const dest = typeof params?.url === "string" ? params.url : "";
+      if (dest.trim() !== "" && !this.isUrlObserved(task.taskId, dest)) {
+        const currentNorm = this.normalizeObservedUrl(snapshot.url);
+        const destNorm = this.normalizeObservedUrl(dest);
+        let allowedHomepage = false;
+        try {
+          const parsed = new URL(dest.trim());
+          const path = parsed.pathname.replace(/\/+$/, "") || "/";
+          const hostParts = parsed.hostname.toLowerCase().split(".").filter((p) => p !== "www" && p !== "");
+          const goalLower = task.goal.toLowerCase();
+          const hostNamed = hostParts.some((part) => part.length >= 3 && goalLower.includes(part));
+          if ((path === "/" || path === "") && hostNamed) allowedHomepage = true;
+        } catch {
+          allowedHomepage = false;
+        }
+        // Same-page reloads are observed by definition; explicit homepages pass.
+        if (destNorm !== currentNorm && !allowedHomepage) {
+          task.recoveryAttempts += 1;
+          task.lastVerifiedResult =
+            `navigate refused: "${dest.slice(0, 120)}" was never observed — web_search first for the goal, then navigate only to a URL from those observed results. Never invent a URL.`;
+          await store.save(task);
+          logger.warn("agent: navigate refused (unobserved URL)", {
+            taskId: task.taskId,
+            actionType: action.action,
+            url: dest.slice(0, 200),
+          });
+          await this.afterFailure(task, snapshot, tabId, store, speak);
+          return;
+        }
+      }
+    }
     const targets = this.targetsOf(snapshot);
     const guardTarget =
       action.target !== undefined ? (targets.get(action.target) ?? null) : null;
@@ -2637,6 +2895,13 @@ export class AgentController {
       task.completedActions += 1;
       task.currentStep += 1;
       task.recoveryAttempts = 0;
+      // A successfully navigated destination becomes observed evidence.
+      if (action.action === "navigate" || action.action === "open_tab") {
+        const params = action.parameters as { url?: unknown } | undefined;
+        if (typeof params?.url === "string" && params.url.trim() !== "") {
+          this.rememberObservedUrls(task.taskId, [params.url]);
+        }
+      }
       if (action.action === "browser_search") {
         // PRD 6.10 §16/§18: search-mode tracking + verified search context.
         // The query is task data (never a secret); the next step must ground
@@ -3053,6 +3318,7 @@ export class AgentController {
     this.activeSkills.delete(taskId);
     this.executionModes.delete(taskId);
     this.consecutiveAsk.delete(taskId);
+    this.observedUrls.delete(taskId);
     this.recorder.discard(taskId); // superseded/cancelled: never recorded
     await this.deps.stopAudio?.(true);
     await this.deps.setAgentActive?.(tabId, false);
@@ -3303,6 +3569,7 @@ export class AgentController {
     this.activeSkills.delete(task.taskId);
     this.executionModes.delete(task.taskId);
     this.consecutiveAsk.delete(task.taskId);
+    this.observedUrls.delete(task.taskId);
     this.taskAbort.delete(task.taskId);
     this.emitProgress({
       taskId: task.taskId,
