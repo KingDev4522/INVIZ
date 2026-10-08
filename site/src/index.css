@@ -1,0 +1,236 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/geist-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/geist-500.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/fonts/geist-600.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./assets/fonts/geist-700.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/geist-mono-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/geist-mono-500.woff2") format("woff2");
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-inverse: var(--inverse);
+  --color-inverse-foreground: var(--inverse-foreground);
+  --color-ns-muted: var(--ns-muted);
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+:root {
+  --background: #fafafa;
+  --foreground: #18181b;
+  --muted: #f2f2f2;
+  --muted-foreground: #52525b;
+  --border: #e0e0e3;
+  --border-strong: #c9c9ce;
+  --accent: #f2f2f2;
+  --inverse: #18181b;
+  --inverse-foreground: #fafafa;
+  --ns-muted: #4d4d4d;
+}
+
+.dark {
+  --background: #0b0b0c;
+  --foreground: #fafafa;
+  --muted: #16161a;
+  --muted-foreground: #a1a1aa;
+  --border: #26262a;
+  --border-strong: #55555d;
+  --accent: #16161a;
+  --inverse: #fafafa;
+  --inverse-foreground: #0b0b0c;
+  --ns-muted: #8f8f8f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --background: #0b0b0c;
+    --foreground: #fafafa;
+    --muted: #16161a;
+    --muted-foreground: #a1a1aa;
+    --border: #26262a;
+    --border-strong: #55555d;
+    --accent: #16161a;
+    --inverse: #fafafa;
+    --inverse-foreground: #0b0b0c;
+    --ns-muted: #8f8f8f;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  section[id] {
+    scroll-margin-top: 84px;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05" 1, "ss03" 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: var(--foreground);
+    color: var(--background);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--foreground);
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility wrap {
+  margin-inline: auto;
+  width: 100%;
+  max-width: 1180px;
+  padding-inline: 24px;
+}
+
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+@utility skip-link {
+  position: absolute;
+  top: -48px;
+  left: 16px;
+  z-index: 100;
+  background-color: var(--inverse);
+  color: var(--inverse-foreground);
+  padding: 10px 16px;
+  font-size: 14px;
+  transition: top 160ms ease;
+}
+
+@utility skip-link-focus {
+  top: 12px;
+}
+
+@layer base {
+  .js [data-reveal] {
+    opacity: 0;
+    transform: translateY(16px);
+    transition:
+      opacity 700ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 700ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition-delay: var(--reveal-delay, 0ms);
+  }
+
+  .js [data-reveal].is-visible {
+    opacity: 1;
+    transform: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .js [data-reveal] {
+      opacity: 1 !important;
+      transform: none !important;
+      transition: none !important;
+    }
+  }
+
+  .static [data-reveal] {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
+[data-step] .step-dot {
+  background-color: var(--border-strong);
+  transition:
+    background-color 320ms ease,
+    rotate 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    scale 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-step].is-active .step-dot {
+  background-color: var(--foreground);
+  rotate: 45deg;
+  scale: 1.35;
+}
+
+[data-step] .step-num {
+  color: var(--muted-foreground);
+  transition: color 320ms ease;
+}
+
+[data-step].is-active .step-num {
+  color: var(--foreground);
+}
