@@ -47,9 +47,18 @@ Output is `frontend/dist/` — the load-unpacked artifact (rebuilt reproducibly)
   More keys means better distribution of rate limits, since both share
   Groq's quota.
 - `OPENROUTER_API_KEY` (single, backend `.env`, optional) is the second
-  reasoning vendor: chat + enrichment round-robin OpenRouter
-  (`google/gemma-4-26b-a4b-it:free`) ↔ Groq (Qwen) with instant failover.
-  Empty = Groq-only reasoning. Audio never leaves Groq.
+  reasoning vendor: reasoning is **local-first** with a bounded cloud standby
+  chain `ollama → openrouter → groq` — never rotation. A healthy local provider
+  ends the request, so normal turns spend no cloud quota; OpenRouter
+  (`google/gemma-4-26b-a4b-it:free`) and Groq (Qwen) are only contacted after
+  local actually fails, with instant failover between them. Empty = cloud-only
+  reasoning. Audio never leaves Groq.
+- `OLLAMA_URL` / `OLLAMA_MODEL` (optional) run local reasoning first. The
+  intended local model is `qwen3.5:9b-q4_K_M` and the tag must match
+  `ollama list` **exactly**. A local outage is bounded, not permanent: after a
+  cooldown the local provider is re-probed automatically, so starting Ollama
+  later recovers without restarting the backend (and `POST /v1/validation`
+  clears the suspension immediately).
 - `TAVILY_API_KEY` (single, backend `.env`) powers web search, fully
   automatic: every turn goes to the AI, which searches the web itself
   (`web_search` action) when the page can't answer — then answers from the

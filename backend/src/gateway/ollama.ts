@@ -5,10 +5,10 @@
  *
  * Live-verified request-shape constraints (Ollama 0.32.15), encoded here so the
  * reasoning contract cannot break on them:
- * 1. `think: false` is always sent. On a THINKING model (qwen3.5:9b-q4_K_M)
- *    it is REQUIRED — otherwise the whole token budget is spent in a separate
- *    `thinking` field and `content` comes back EMPTY. On a non-thinking model
- *    (the previous default, llama3.2:3b) Ollama accepts and ignores it.
+ * 1. `think: false` is always sent. On a THINKING model (the configured
+ *    default, qwen3.5:9b-q4_K_M) it is REQUIRED — otherwise the whole token
+ *    budget is spent in a separate `thinking` field and `content` comes back
+ *    EMPTY. On a non-thinking model Ollama accepts and ignores it.
  * 2. `format: <json-schema>` returns HTTP 500 on this build, so structured
  *    output uses `format: "json"` plus the shared JSON-only system prompt.
  *

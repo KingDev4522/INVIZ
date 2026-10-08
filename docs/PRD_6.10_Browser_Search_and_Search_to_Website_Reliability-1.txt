@@ -1,0 +1,471 @@
+PRD 6.10 — Browser Search & Search-to-Website Reliability
+
+Project: INVIZ
+Feature: Browser-Level Search / Omnibox Search
+Status: Proposed
+Priority: Critical
+
+1. PROBLEM
+
+When Chrome is already open and the user says "Search for Tesla", INVIZ must perform a browser-level search using Chrome's configured/default search engine.
+
+Current pain points:
+- INVIZ may use Tavily instead of browser search.
+- It may confuse browser search with the current website's search.
+- It may fail to enter or submit the query.
+- It may fail to observe the resulting search-results page.
+- It may fail to continue from results.
+- It may fail to open the requested website.
+
+2. GOALS
+
+G1. Make browser search a first-class INVIZ capability.
+
+G2. Support browser search from any already-open page without requiring the user to first open Google.
+
+G3. Distinguish:
+- browser search,
+- current-page/site search,
+- deterministic navigation,
+- external web research.
+
+G4. After browser search, obtain a fresh ContextLens observation.
+
+G5. Reliably support search → website and search → media multi-step flows.
+
+G6. Keep the implementation generic. Do not create Google-, YouTube-, or Netflix-specific selectors.
+
+G7. Preserve all existing INVIZ contracts, including action schemas, outcome types, WebGuard, approval/consent, task state, ContextLens, verification, skills, language handling, benchmark harness, and existing web-search behavior.
+
+3. NON-GOALS
+
+Do not:
+- replace Tavily,
+- remove web_search,
+- redesign WebGuard,
+- add site-specific selectors,
+- create a new LLM provider,
+- bypass Chrome security boundaries,
+- assume a specific search engine,
+- use coordinates as the primary control mechanism.
+
+4. SEARCH TAXONOMY
+
+BROWSER SEARCH:
+"Search for Tesla."
+Meaning: search using Chrome's configured/default search engine.
+
+PAGE/SITE SEARCH:
+"Search this website for Tesla."
+"Search YouTube for Baby."
+Meaning: discover and use the current page's search UI through ContextLens.
+
+EXTERNAL WEB RESEARCH:
+"Who is the CEO of Tesla?"
+If the current page cannot answer it, web_search/Tavily may be appropriate.
+
+The word "search" alone must never automatically trigger Tavily.
+
+5. INTENT CLASSIFICATION
+
+Examples:
+- "Search for Tesla." → browser search
+- "Google Tesla." → browser search
+- "Search Tesla and open the official website." → browser search + navigation
+- "Search this page for Tesla." → page search
+- "Search YouTube for Baby." → page/site search
+- "Who is Tesla's CEO?" → answer/research
+- "Open Tesla.com." → deterministic navigation
+
+6. BROWSER SEARCH EXECUTION
+
+Provide a deterministic browser-search mechanism.
+
+Preferred semantic capability:
+BROWSER_SEARCH(query)
+
+Before adding a new action type, inspect the existing INVIZ action schema. Reuse an existing compatible navigation/search action if possible.
+
+A new action type requires explicit schema, validator, WebGuard, executor, and test changes.
+
+7. REQUIRED FLOWS
+
+Basic:
+IDLE
+→ classify browser search
+→ resolve query
+→ execute browser search
+→ wait for navigation/result state
+→ request fresh snapshot
+→ verify search-results state
+→ complete
+
+Search + website:
+classify
+→ browser search
+→ wait
+→ fresh ContextLens snapshot
+→ ground result
+→ open/click verified result
+→ fresh destination snapshot
+→ verify destination
+→ complete
+
+8. OMNIBOX / BROWSER SEARCH IMPLEMENTATION
+
+Determine the safest supported Chrome extension mechanism for initiating browser-level search.
+
+Do not assume a normal content script can directly control Chrome's privileged omnibox.
+
+Verify the implementation against Chrome/Manifest V3 capabilities.
+
+If direct omnibox control is unavailable, use a supported equivalent navigation mechanism that produces browser-search behavior.
+
+Do not implement an unsupported fake omnibox API.
+
+9. QUERY CONSTRUCTION
+
+Examples:
+"search for tesla" → "tesla"
+"google best laptops under $1000" → "best laptops under $1000"
+"search for baby by justin bieber" → "baby justin bieber"
+
+Preserve meaningful user wording. Do not send browser-search queries through Tavily merely for query cleanup.
+
+10. FRESH OBSERVATION
+
+After browser search, the previous page snapshot is stale.
+
+The controller must:
+1. detect navigation/page-state change,
+2. wait for the page to become observable,
+3. obtain a fresh ContextLens snapshot,
+4. verify URL/page identity where available,
+5. reason only from the fresh observation.
+
+Never click a result using targets from the pre-search page.
+
+11. SEARCH → WEBSITE
+
+For:
+"Search for Tesla and open the official website."
+
+Do not invent a URL unless it is already deterministically known through an existing trusted navigation mechanism.
+
+For result-driven navigation:
+search result
+→ ContextLens
+→ verified result
+→ open/click
+
+Navigation must use an observed/verified destination.
+
+12. RESULT SELECTION
+
+Use:
+1. explicit user wording,
+2. visible title,
+3. domain,
+4. snippet/context,
+5. ordinal position,
+6. task context.
+
+"Open the first result." means the first matching result in verified page order.
+
+"Open the official Tesla website." means choose the observed result whose title/domain/context most strongly indicates the official site.
+
+No Google-specific CSS selectors.
+
+13. CURRENT-PAGE SEARCH
+
+Browser search must not replace current-page search.
+
+For:
+"Search YouTube for Baby."
+
+Preferred:
+current page
+→ ContextLens
+→ search control
+→ type Baby
+→ submit
+→ fresh ContextLens
+→ results
+
+Do not use Tavily for this when the current page can perform the search.
+
+14. WEB-RESEARCH GUARD
+
+Preserve the existing PRD 6.9 search restraint.
+
+Priority:
+1. Current page can answer/act → use current page.
+2. Current page needs site search → page/site search.
+3. User asks for general browser search → browser search.
+4. Known deterministic destination → direct navigation.
+5. Fresh external information genuinely required → web_search.
+
+Existing deterministic web_search gates remain authoritative, including duplicate-query and per-task budget protections.
+
+15. SEARCH + MEDIA
+
+"Search for Baby by Justin Bieber and play it."
+
+Expected:
+browser/site search
+→ fresh results
+→ correct media result
+→ open/select
+→ fresh media observation
+→ play
+→ verify actual playback
+
+"Search YouTube for Baby and play it."
+
+Expected:
+current-page search
+→ fresh results
+→ select Baby
+→ play
+→ verify
+
+No site-specific adapter is required.
+
+16. TASK STATE
+
+Where compatible with the existing model, track search mode:
+- none
+- browser
+- page
+- web_research
+
+Preserve:
+- original goal,
+- current step,
+- active tab,
+- current URL,
+- query where relevant,
+- completed actions,
+- lastVerifiedResult,
+- observation generation/version where available.
+
+Do not add redundant state if the existing task model already represents it.
+
+17. STALE TARGET PROTECTION
+
+After browser search, prevent:
+old snapshot → old target → click.
+
+Use existing ContextLens generation/URL/timestamp mechanisms where available.
+
+At minimum, the next action after browser search must use a fresh page observation.
+
+18. VERIFICATION
+
+"Search for Tesla." succeeds only with evidence that the browser reached a search-results state or equivalent successful search destination.
+
+"Search for Tesla and open the official website." succeeds only when:
+- search succeeded,
+- requested result opened,
+- destination matches the requested intent.
+
+"Search for Baby and play it." succeeds only when:
+- search succeeded,
+- correct media selected,
+- playback state verified.
+
+An attempted click/navigation is not proof of completion.
+
+19. FAILURE RECOVERY
+
+Search submission failure:
+→ fresh observation before retry.
+
+Navigation timeout:
+→ determine whether navigation actually occurred before retrying.
+
+Empty results:
+→ do not blindly repeat the same query.
+
+Wrong result:
+→ re-observe and select another grounded result when user intent permits.
+
+Stale target:
+→ discard it and obtain a fresh snapshot.
+
+Search-engine failure:
+→ use the existing failure outcome.
+
+Do not silently switch to Tavily unless the user's task genuinely becomes external research.
+
+20. SYSTEM PROMPT COMPATIBILITY
+
+Do NOT replace SYSTEM_PROMPT_V1 wholesale.
+
+Add browser-search semantics while preserving every existing hard dependency, including:
+- exact outcome shapes,
+- exact field names,
+- exact action-object key allowlist,
+- answer,
+- ask_user,
+- action,
+- skill,
+- confirmation,
+- task_complete,
+- cannot_complete,
+- lang,
+- user's-language requirement,
+- bilingual EN/HI behavior,
+- [AVAILABLE SKILLS],
+- ask_user.sensitivity = "high",
+- chrome:// / file:// / about: refusal behavior,
+- benchmark-harness assumptions.
+
+Add explicit distinctions:
+BROWSER SEARCH
+PAGE SEARCH
+WEB RESEARCH
+
+Teach:
+"Search for X" normally means browser-level search unless the user specifies a page/site context.
+
+The existing schema remains authoritative.
+
+21. SECURITY
+
+Browser search must continue through:
+schema validation
+→ WebGuard
+→ approval/consent
+→ executor.
+
+Never bypass WebGuard.
+
+Do not expose passwords, authentication tokens, secrets, or private form data in search queries.
+
+Sensitive searches must follow existing consent/security rules.
+
+22. TESTS
+
+Required unit coverage:
+1. "search for Tesla" → browser search.
+2. "Google Tesla" → browser search.
+3. "search YouTube for Baby" → page search.
+4. "search this page for Tesla" → page search.
+5. "Who is Tesla's CEO?" → information/research.
+6. "open Tesla.com" → deterministic navigation.
+7. browser-search query extraction.
+8. search-result state transition.
+9. stale-target rejection after search.
+10. verified-result selection.
+11. first-result selection.
+12. search → website continuation.
+13. search → media continuation.
+14. search failure recovery.
+15. WebGuard enforcement.
+16. existing web_search gate tests remain green.
+
+Prompt contract tests must preserve:
+- all existing outcome types,
+- exact field requirements,
+- action-key restrictions,
+- lang,
+- language behavior,
+- [AVAILABLE SKILLS],
+- skill,
+- ask_user,
+- sensitivity: "high",
+- unsupported-page rules.
+
+23. END-TO-END ACCEPTANCE TESTS
+
+A1:
+"Search for Tesla."
+Expected: browser search → results → verified completion. Tavily = 0.
+
+A2:
+"Search for Tesla and open the official website."
+Expected: browser search → fresh results → official result → website → verification.
+
+A3:
+"Search YouTube for Baby."
+Expected: current-site search → Baby results. Tavily = 0.
+
+A4:
+"Search for Baby by Justin Bieber and play it."
+Expected: search → fresh results → correct media → playback → verification.
+
+A5:
+User is already on an arbitrary website and says:
+"Search for Tesla."
+Expected: browser-level search without requiring Google to be opened first.
+
+A6:
+"Search for Wikipedia."
+Then:
+"Open the first result."
+Expected: search → fresh results → first result → navigation.
+
+A7:
+Browser-search commands must not call Tavily unless the task explicitly becomes external research.
+
+24. OBSERVABILITY
+
+Record structured, privacy-safe telemetry sufficient to diagnose:
+- intent classification,
+- search mode,
+- query,
+- active tab,
+- pre-search URL,
+- search execution result,
+- navigation detection,
+- snapshot refresh,
+- result count,
+- selected result,
+- destination URL/domain,
+- verification result,
+- failure/recovery reason,
+- model/provider,
+- latency,
+- final outcome.
+
+Never record passwords, credentials, cookies, private form values, raw page contents, or sensitive screenshots.
+
+Telemetry must not control the real-time action path.
+
+25. ACCEPTANCE CRITERIA
+
+Complete only when:
+1. "Search for X" reliably performs browser-level search.
+2. It works from an already-open arbitrary page.
+3. It does not require Google to be manually opened first.
+4. Browser search is distinct from page search.
+5. Browser search is distinct from Tavily research.
+6. Search results produce a fresh ContextLens observation.
+7. Search → website works generically.
+8. Search → media works generically.
+9. Stale targets are not reused after search navigation.
+10. Actual completion is verified.
+11. WebGuard remains mandatory.
+12. Existing SYSTEM_PROMPT_V1 schema contracts remain intact.
+13. Existing skills remain reachable.
+14. Existing language behavior remains intact.
+15. Existing web_search restraint tests remain green.
+16. No Google/YouTube/Netflix-specific selectors are required.
+17. Existing frontend/backend typecheck, build, and test suites remain green.
+
+26. ARCHITECTURAL PRINCIPLE
+
+USER
+→ Intent Classification
+→ PAGE SEARCH / BROWSER SEARCH / WEB RESEARCH
+→ ContextLens / Chrome Search / Tavily
+→ Fresh Observation
+→ Target Grounding
+→ WebGuard
+→ Executor
+→ Verification
+→ Task State
+→ next step
+
+The key architectural change is that browser search becomes a first-class capability in the agent's action model rather than being treated as generic web research or accidental page interaction.

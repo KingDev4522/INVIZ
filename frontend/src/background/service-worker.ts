@@ -11,6 +11,7 @@ import { COMMANDS, STORAGE_KEY_CONFIG, STORAGE_KEY_CREDENTIALS } from "../../../
 import { getErrorSpeech, isKnownMessageType } from "../../../shared/messages.js";
 import { isExtensionMessage } from "../../../shared/types.js";
 import { logger } from "../../../shared/logger.js";
+import { DIAG_KEY, pushDiag, type DiagEntry } from "../../../shared/diag.js";
 import { storePageState, type StoredPageState } from "./page-state-store.js";
 import { supportOf } from "../../../shared/page-support.js";
 import {
@@ -136,6 +137,41 @@ function newVoiceTurnId(): string {
 let voiceTurnInFlight: { turnId: string; startedAtMs: number } | null = null;
 
 /**
+ * Turn ids the user explicitly cancelled (overlay X / Ctrl+Shift+X / "stop").
+ * A transcript that arrives AFTER its turn was cancelled (e.g. X pressed
+ * during transcription) must never spawn a task — otherwise cancelling looks
+ * broken: speech stops, then the agent starts acting on the stopped request.
+ * One-shot: entries are consumed on match and expire after 5 minutes, so a
+ * reused id can never suppress a future turn.
+ */
+const cancelledTurnIds = new Map<string, number>();
+const CANCELLED_TURN_TTL_MS = 300_000;
+
+function rememberCancelledTurn(turnId: string | undefined): void {
+  if (turnId === undefined || turnId === "") return;
+  cancelledTurnIds.set(turnId, Date.now());
+  if (cancelledTurnIds.size > 50) {
+    const cutoff = Date.now() - CANCELLED_TURN_TTL_MS;
+    for (const [key, at] of cancelledTurnIds) {
+      if (at < cutoff) cancelledTurnIds.delete(key);
+    }
+  }
+}
+
+/** True when this transcript belongs to a user-cancelled turn (consumes the entry). */
+function isTranscriptCancelled(key: string | undefined, turnId: string | undefined): boolean {
+  for (const candidate of [key, turnId]) {
+    if (candidate === undefined || candidate === "") continue;
+    const at = cancelledTurnIds.get(candidate);
+    if (at !== undefined && Date.now() - at < CANCELLED_TURN_TTL_MS) {
+      cancelledTurnIds.delete(candidate);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Runs one voice turn: resolve the target tab, start capture in the offscreen
  * document, and log the outcome. Shared by the keyboard command and the popup
  * button so both paths attribute transcripts identically.
@@ -186,12 +222,29 @@ export async function startVoiceTurn(): Promise<void> {
   const turnId = newVoiceTurnId();
   voiceTurnInFlight = { turnId, startedAtMs: Date.now() };
   try {
-    await ensureOffscreenReady();
     const tabId = await activeTabId().catch(() => undefined);
-    if (tabId !== undefined) lastVoiceTabId = tabId;
     if (tabId !== undefined) {
+      lastVoiceTabId = tabId;
+      // Restricted surfaces (chrome://, Web Store, PDFs, …) cannot show the
+      // overlay or provide a snapshot — but they must NOT kill the whole turn:
+      // capture, transcription and page-independent actions (deterministic
+      // open-site navigation, web search) need no page access at all. The turn
+      // proceeds; page-bound steps fail honestly downstream (CANNOT_ACCESS_PAGE
+      // on a missing snapshot, UNSUPPORTED_PAGE on a restricted scheme, or the
+      // model's cannot_complete). Content scripts are still never injected
+      // into restricted pages — nothing here bypasses that Chrome restriction.
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+      if (!supportOf(tab?.url).supported) {
+        logger.info("command: voice turn on restricted surface; page steps will fail honestly", {
+          turnId,
+          requestType: "voice-turn",
+          timestampMs: Date.now(),
+          reason: supportOf(tab?.url).reason,
+        });
+      }
       void sendVoiceStatus(tabId, "listening", { turnId });
     }
+    await ensureOffscreenReady();
     // The offscreen document cannot resolve the backend on its own, so the ref
     // travels with the request. Resolving it here is also what keeps a missing
     // URL from surfacing as a bogus transcription failure.
@@ -286,11 +339,15 @@ async function refreshBootBadge(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => {
   void refreshBootBadge();
+  // Pre-warm the offscreen document so the first Ctrl+Shift+V of a session
+  // doesn't pay document creation + listener-registration latency.
+  void ensureOffscreenReady().catch(() => undefined);
   logger.info("service worker installed");
 });
 
 chrome.runtime.onStartup.addListener(() => {
   void refreshBootBadge();
+  void ensureOffscreenReady().catch(() => undefined);
 });
 
 chrome.commands.onCommand.addListener((command: string) => {
@@ -298,12 +355,21 @@ chrome.commands.onCommand.addListener((command: string) => {
     case COMMANDS.TOGGLE_VOICELENS:
       // Real toggle: flip the persisted VoiceLens flag (popup reads the same key).
       void (async () => {
-        const cfg = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
-        const current =
-          ((cfg[STORAGE_KEY_CONFIG] as { voicelensEnabled?: boolean } | undefined)
-            ?.voicelensEnabled) === true;
+        // READ-MODIFY-WRITE. The config object holds independent operator flags
+        // (voicelensEnabled, powerMode, harnessEnabled, episodeRecording, …).
+        // Writing a fresh `{ voicelensEnabled }` here replaced the WHOLE object
+        // and silently reset every unrelated flag to undefined — i.e. toggling
+        // VoiceLens from the keyboard quietly cleared Power Mode / Harness Exec.
+        // Spread the existing object and change only the one key.
+        const stored = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
+        const raw = stored[STORAGE_KEY_CONFIG];
+        const existing: Record<string, unknown> =
+          typeof raw === "object" && raw !== null && !Array.isArray(raw)
+            ? (raw as Record<string, unknown>)
+            : {};
+        const current = existing["voicelensEnabled"] === true;
         await chrome.storage.local.set({
-          [STORAGE_KEY_CONFIG]: { voicelensEnabled: !current },
+          [STORAGE_KEY_CONFIG]: { ...existing, voicelensEnabled: !current },
         });
         logger.info("command: toggle-voicelens", { enabled: String(!current) });
       })().catch(() => undefined);
@@ -324,6 +390,8 @@ chrome.commands.onCommand.addListener((command: string) => {
       // Keyless: stop audio + cancel the active task if one exists.
       void (async () => {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        // Same late-transcript protection as the overlay X path.
+        rememberCancelledTurn(voiceTurnInFlight?.turnId);
         const store = { load: loadTask, save: saveTask, clear: clearTask };
         const task = await store.load().catch(() => null);
         if (task !== null && tab?.id !== undefined && !isTerminal(task.status)) {
@@ -335,6 +403,9 @@ chrome.commands.onCommand.addListener((command: string) => {
             setAgentActive: setTabAgentActive,
           });
           await controller.cancelTask(task.taskId, tab.id, store);
+          // The keyboard-cancel controller has no onProgress: move the
+          // overlay off stale thinking explicitly.
+          await sendVoiceStatus(tab.id, "done", { text: "Task cancelled." });
         } else {
           await stopAllAudio();
         }
@@ -468,6 +539,31 @@ chrome.runtime.onMessage.addListener(
       );
       return true;
     }
+    if (message.type === "VOICE_DIAG") {
+      // Offscreen voice-log relay: the offscreen document has no dependable
+      // chrome.storage access, so the worker (single storage owner) appends
+      // to the ring buffer the Options page renders. Metadata only.
+      const rawKind = message.payload["kind"];
+      const rawText = message.payload["text"];
+      const kind = typeof rawKind === "string" ? rawKind.slice(0, 32) : "";
+      const text = typeof rawText === "string" ? rawText.slice(0, 500) : "";
+      if (kind === "" || text === "") {
+        sendResponse({ ok: false, errorCode: "SCHEMA_VALIDATION_FAILED" });
+        return false;
+      }
+      void (async () => {
+        const stored = await chrome.storage.local.get(DIAG_KEY);
+        const raw = stored[DIAG_KEY];
+        const log: DiagEntry[] = Array.isArray(raw) ? (raw as DiagEntry[]) : [];
+        await chrome.storage.local.set({
+          [DIAG_KEY]: pushDiag(log, { t: Date.now(), kind, text }),
+        });
+      })().then(
+        () => sendResponse({ ok: true }),
+        () => sendResponse({ ok: false, errorCode: "ACTION_FAILED" }),
+      );
+      return true;
+    }
     if (message.type === "TTS_SPEAK" ||
       message.type === "TTS_STOP" ||
       message.type === "TTS_REPEAT" ||
@@ -502,11 +598,52 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ ok: false, errorCode: "TRANSCRIPTION_FAILED" });
         return false;
       }
+      // Cancelled-turn guard: X pressed during transcription. Drop the
+      // transcript entirely — no overlay echo, no task, no speech.
+      const rawTurnIdEarly = (raw as { turnId?: unknown }).turnId;
+      if (
+        isTranscriptCancelled(
+          typeof transcriptKey === "string" ? transcriptKey : undefined,
+          typeof rawTurnIdEarly === "string" ? rawTurnIdEarly : undefined,
+        )
+      ) {
+        logger.info("voice: transcript of cancelled turn dropped", {
+          turnId: typeof transcriptKey === "string" ? transcriptKey : "unknown",
+          requestType: "voice-transcript",
+          timestampMs: Date.now(),
+          outcome: "cancelled-dropped",
+        });
+        sendResponse({ ok: true, routed: false, cancelled: true });
+        return false;
+      }
       // The offscreen document has no tab, so the starter supplies one. Fall
       // back to the focused tab rather than discarding a good transcript: a
       // dropped transcript is indistinguishable from a broken mic.
       void (async () => {
-        const tabId = sender.tab?.id ?? message.tabId ?? (await activeTabId().catch(() => undefined));
+        // CURRENT-PAGE rule: the already-open active tab IS the context. The
+        // capture-start tab (message.tabId) can be stale — the user may have
+        // switched to YouTube during capture/transcription. Prefer the LIVE
+        // active tab at transcript time; fall back to the capture tab only
+        // when no active tab is resolvable. Never navigate, never require
+        // "open YouTube" — the current page must suffice.
+        const captureTabId =
+          sender.tab?.id ?? (typeof message.tabId === "number" ? message.tabId : undefined);
+        const liveTabId = await activeTabId().catch(() => undefined);
+        let tabId = liveTabId ?? captureTabId;
+        if (
+          captureTabId !== undefined &&
+          liveTabId !== undefined &&
+          captureTabId !== liveTabId
+        ) {
+          logger.info("voice: transcript re-attributed to live active tab", {
+            ...(typeof transcriptKey === "string" ? { turnId: transcriptKey } : {}),
+            requestType: "voice-transcript",
+            timestampMs: Date.now(),
+            captureTabId,
+            liveTabId,
+          });
+          tabId = liveTabId;
+        }
         if (tabId === undefined) {
           // Nothing to act on. Say so instead of failing silently.
           await speakText(getErrorSpeech("UNSUPPORTED_PAGE", "en"), "en", 3).catch(
@@ -588,7 +725,14 @@ chrome.runtime.onMessage.addListener(
     }
     if (message.type === "CANCEL_TASK") {
       // Keyless path: cancellation and audio halt must work without C1.
+      // silent:true (overlay X button) stops everything WITHOUT speaking —
+      // an explicit UI stop must never narrate "Task cancelled."
+      const silent = message.payload["silent"] === true;
       const tabId = sender.tab?.id ?? message.tabId;
+      // Remember the in-flight turn id (if any) BEFORE cancelling, so a
+      // transcript that is already being transcribed still gets dropped on
+      // arrival instead of spawning a task after the user pressed X.
+      rememberCancelledTurn(voiceTurnInFlight?.turnId);
       const store = { load: loadTask, save: saveTask, clear: clearTask };
       const controller = new AgentController({
         // No backend ref: cancel/pause paths never reason.
@@ -614,10 +758,27 @@ chrome.runtime.onMessage.addListener(
         .load()
         .then(async (task) => {
           if (task !== null && tabId !== undefined && !isTerminal(task.status)) {
-            await controller.cancelTask(task.taskId, tabId, store);
+            await controller.cancelTask(task.taskId, tabId, store, silent);
+            // Non-silent cancels (keyboard/voice) must also move the
+            // on-screen overlay: its controller has no onProgress, so without
+            // this the pill stays stuck on stale thinking. Silent overlay-X
+            // cancels hide the pill themselves — never re-show it.
+            if (!silent) {
+              await sendVoiceStatus(tabId, "done", { text: "Task cancelled." });
+            }
           } else {
             await stopAllAudio();
           }
+          // A capture may be in flight with no task yet (user pressed X while
+          // speaking the request): halt the mic too. TTS_STOP already cleared
+          // queued speech inside cancelTask/stopAllAudio.
+          await chrome.runtime
+            .sendMessage({
+              type: "VOICE_CAPTURE_STOP",
+              requestId: `req_${Date.now()}`,
+              payload: { target: "offscreen" },
+            })
+            .catch(() => undefined);
         })
         .then(
           () => sendResponse({ ok: true }),

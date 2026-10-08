@@ -125,6 +125,40 @@ describe("validateBridgeRequest — fail closed", () => {
     expect(jsUrl.ok).toBe(false);
   });
 
+  it("accepts a grounding node descriptor and keeps it out of the action", () => {
+    const out = validateBridgeRequest(
+      req({ args: { target: "e2", node: { role: "button", name: "Submit" } } }),
+      ctx(),
+    );
+    expect(out.ok).toBe(true);
+    expect((out.value?.args as Record<string, unknown>)["node"]).toEqual({
+      role: "button",
+      name: "Submit",
+    });
+    // The node never leaks into the closed StructuredAction schema.
+    expect(bridgeCapabilityToAction("click", out.value?.args ?? {}, 5)).toEqual({
+      action: "click",
+      target: "e2",
+      pageGeneration: 5,
+    });
+  });
+
+  it("rejects malformed node descriptors", () => {
+    for (const node of [
+      "Submit",
+      { role: "", name: "x" },
+      { role: "button" },
+      { role: "button", name: "x".repeat(201) },
+    ]) {
+      const out = validateBridgeRequest(
+        req({ args: { target: "e2", node } }),
+        ctx(),
+      );
+      expect(out.ok).toBe(false);
+      expect(out.errorCode).toBe("invalid_args");
+    }
+  });
+
   it("rejects unknown argument keys (never silently drops them)", () => {
     const out = validateBridgeRequest(
       req({ capability: "get_page_state", args: { script: "alert(1)" } }),

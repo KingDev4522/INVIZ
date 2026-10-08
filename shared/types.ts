@@ -294,7 +294,8 @@ export type ActionType =
   | "open_tab"
   | "close_tab"
   | "read"
-  | "web_search";
+  | "web_search"
+  | "browser_search";
 
 export const ACTION_TYPES: readonly ActionType[] = [
   "click",
@@ -310,6 +311,7 @@ export const ACTION_TYPES: readonly ActionType[] = [
   "close_tab",
   "read",
   "web_search",
+  "browser_search",
 ] as const;
 
 export type ExpectationType =
@@ -735,6 +737,23 @@ export function validateStructuredAction(v: unknown): ValidationResult {
     }
     if (v["target"] !== undefined) {
       errors.push("target: web_search takes no target");
+    }
+  }
+
+  if (action === "browser_search") {
+    // PRD 6.10 §6: first-class browser-level search (Chrome default engine).
+    // Query-only, targetless like web_search. The controller owns query
+    // construction and the executor owns engine navigation — the model never
+    // invents a search URL (existing NEVER-invent-URLs rule still applies).
+    const params = isRecord(v["parameters"]) ? v["parameters"] : undefined;
+    const query = params !== undefined ? params["query"] : undefined;
+    if (typeof query !== "string" || query.trim() === "") {
+      errors.push("parameters.query: required non-empty string for browser_search");
+    } else if (query.length > 400) {
+      errors.push("parameters.query: exceeds 400 characters");
+    }
+    if (v["target"] !== undefined) {
+      errors.push("target: browser_search takes no target");
     }
   }
 

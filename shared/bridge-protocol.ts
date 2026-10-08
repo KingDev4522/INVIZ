@@ -87,6 +87,12 @@ export interface BridgeRequest {
   args: Record<string, unknown>;
   /** PageState generation the request was derived from. */
   pageGeneration?: number;
+  /**
+   * Page URL the extension acted on. Lets the host attach to the SAME tab
+   * (it drives the shared Chrome instance, not the extension's tab id).
+   * Optional; validated as a bounded string when present.
+   */
+  url?: string;
   skillRef?: BridgeSkillRef;
 }
 
@@ -217,12 +223,38 @@ export function validateBridgeRequest(
   // Fail closed on unknown argument keys: an unrecognised key must be
   // rejected, never silently dropped (dropping it would mask a smuggled
   // field that a downstream consumer might interpret differently).
-  const ALLOWED_ARGS = ["target", "value", "parameters", "expect"] as const;
+  // "node" is the ONE grounding descriptor an external executor needs: the
+  // extension-side element ref (eNN) is meaningless outside the tab, so the
+  // controller attaches { role, name } and the host resolves it against the
+  // live accessibility tree. Shape-validated below; never projected into the
+  // StructuredAction (the closed schema has no such field).
+  const ALLOWED_ARGS = ["target", "value", "parameters", "expect", "node"] as const;
   if (isRecord(args)) {
     for (const key of Object.keys(args)) {
       if (!(ALLOWED_ARGS as readonly string[]).includes(key)) {
         errors.push(`args: unknown argument "${key}"`);
       }
+    }
+    const node = args["node"];
+    if (node !== undefined) {
+      if (
+        !isRecord(node) ||
+        typeof node["role"] !== "string" ||
+        typeof node["name"] !== "string" ||
+        node["role"] === "" ||
+        node["name"].length > 200
+      ) {
+        errors.push('args: node must be { role: non-empty string, name: string ≤200 chars }');
+      }
+    }
+  }
+
+  let url: string | undefined;
+  if (raw["url"] !== undefined) {
+    if (typeof raw["url"] !== "string" || raw["url"].length > 2048) {
+      errors.push("url: must be a string of at most 2048 chars");
+    } else {
+      url = raw["url"];
     }
   }
 
@@ -257,6 +289,7 @@ export function validateBridgeRequest(
     capability,
     args: (args as Record<string, unknown> | undefined) ?? {},
     ...(pageGeneration !== undefined ? { pageGeneration } : {}),
+    ...(url !== undefined ? { url } : {}),
     ...(isRecord(raw["skillRef"]) && typeof raw["skillRef"]["skillId"] === "string"
       ? {
           skillRef: {

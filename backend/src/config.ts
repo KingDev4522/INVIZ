@@ -6,7 +6,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { OPENROUTER_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL, OLLAMA_DEFAULT_URL } from "../../shared/constants.js";
+import { OPENROUTER_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL, OLLAMA_DEFAULT_URL, parseContextMode, type ContextMode } from "../../shared/constants.js";
 
 /**
  * Which reasoning provider leads the rotation.
@@ -16,6 +16,20 @@ import { OPENROUTER_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL, OLLAMA_DEFAULT_URL } fr
 export type LlmProvider = "auto" | "ollama" | "groq" | "openrouter";
 
 const LLM_PROVIDERS: ReadonlySet<string> = new Set(["auto", "ollama", "groq", "openrouter"]);
+
+/**
+ * EXPERIMENTAL context mode (see shared/constants.ts for the full contract).
+ * Re-exported here so backend consumers have one obvious import site.
+ *
+ * - "dom" (DEFAULT): exactly the existing DOM/ARIA context path. No image is
+ *   ever forwarded to a model, even if a client sends one.
+ * - "hybrid": opt-in. A client-supplied viewport screenshot is forwarded as
+ *   Ollama multimodal input alongside a compact target registry.
+ *
+ * Fail-open to "dom" (same pattern as LLM_PROVIDER): a typo must never break
+ * the running backend, and the safe default is the production one.
+ */
+export type { ContextMode } from "../../shared/constants.js";
 
 export interface BackendConfig {
   /** Shared by reasoning, transcription and speech. 1..N. */
@@ -39,6 +53,8 @@ export interface BackendConfig {
   ollamaTimeoutMs: number;
   /** Primary provider selector (see LlmProvider). */
   llmProvider: LlmProvider;
+  /** EXPERIMENTAL: "dom" (default) or "hybrid" vision prototype. */
+  contextMode: ContextMode;
   /** Web search for the agent (Tavily). Required: search is a core capability. */
   tavilyKey: string;
   port: number;
@@ -133,6 +149,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BackendConfig 
     llmProvider: LLM_PROVIDERS.has(llmProviderRaw)
       ? (llmProviderRaw as LlmProvider)
       : "auto",
+    // Invalid value fails OPEN to "dom": never silently enable an experiment.
+    contextMode: parseContextMode(env["CONTEXT_MODE"] ?? "dom"),
     port,
     backendToken: (env["BACKEND_TOKEN"] ?? "").trim(),
   };
@@ -158,6 +176,8 @@ export function configSummary(config: BackendConfig): Record<string, unknown> {
         }
       : {}),
     port: config.port,
+    // Not secret: tells the operator which context path is active.
+    contextMode: config.contextMode,
     authMode: config.backendToken !== "" ? "bearer" : "open-loopback-dev",
   };
 }

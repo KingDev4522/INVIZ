@@ -201,6 +201,7 @@ describe("validateSkillActionType (ActionType compatibility)", () => {
       "close_tab",
       "read",
       "web_search",
+      "browser_search",
     ]) {
       expect(validateSkillActionType(action)).toBe(true);
     }

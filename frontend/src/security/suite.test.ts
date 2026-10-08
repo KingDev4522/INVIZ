@@ -411,6 +411,35 @@ describe("upload/download inexpressible + navigation policy", () => {
     ).toBe("ALLOW");
   });
 
+  it("browser_search is targetless, query-bound, and guard-ALLOWed (PRD 6.10 §6/§21)", () => {
+    expect(
+      validateStructuredAction({ action: "browser_search", parameters: { query: "tesla" } }).ok,
+    ).toBe(true);
+    expect(validateStructuredAction({ action: "browser_search", parameters: {} }).ok).toBe(false);
+    expect(validateStructuredAction({ action: "browser_search", parameters: { query: "" } }).ok).toBe(
+      false,
+    );
+    expect(
+      validateStructuredAction({
+        action: "browser_search",
+        target: "e1",
+        parameters: { query: "x" },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateStructuredAction({
+        action: "browser_search",
+        parameters: { query: "x".repeat(401) },
+      }).ok,
+    ).toBe(false);
+    expect(
+      evaluate(
+        { action: "browser_search", parameters: { query: "tesla" } },
+        { currentGeneration: 1, targets: new Map(), provenance: "USER", sensitiveAuthorized: false },
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
   it("dangerous schemes rejected, https allowed", () => {
     for (const url of ["javascript:alert(1)", "data:text/html,x", "file:///x", "view-source:https://a/", "chrome://settings"]) {
       expect(

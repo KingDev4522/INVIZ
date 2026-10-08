@@ -75,8 +75,13 @@ async function touchLru(tabId: number): Promise<void> {
 }
 
 /**
- * Stores one tab's snapshot, enforcing the 1MB per-tab cap by truncating
- * items from the tail (least significant last) and recording the cut.
+ * Stores one tab's snapshot, enforcing the 1MB per-tab cap with generic
+ * head+tail preservation (no site-specific ranking).
+ *
+ * Document order puts persistent header/nav first and main content last, so
+ * a pure prefix cut always starves the tail on huge pages. When over budget
+ * this keeps ~1/3 head (chrome, priorities) + ~2/3 tail (main content),
+ * mirroring the serializer's generic head+tail split.
  */
 export async function storePageState(
   state: StoredPageState,
@@ -85,18 +90,25 @@ export async function storePageState(
   let truncated = false;
   let raw = JSON.stringify({ ...state, items });
   if (raw.length > PAGE_STATE_TAB_CAP_BYTES) {
-    // Binary-search the largest fitting prefix to avoid O(n) re-serializing.
+    const headTail = (n: number): typeof items => {
+      if (n >= items.length) return items;
+      if (n <= 0) return [];
+      const headN = Math.ceil(n / 3);
+      const tailN = n - headN;
+      return [...items.slice(0, headN), ...items.slice(items.length - tailN)];
+    };
+    // Binary-search the largest fitting head+tail count to avoid O(n) re-serializing.
     let lo = 0;
     let hi = items.length;
     while (lo < hi) {
       const mid = Math.floor((lo + hi + 1) / 2);
-      if (JSON.stringify({ ...state, items: items.slice(0, mid) }).length <= PAGE_STATE_TAB_CAP_BYTES) {
+      if (JSON.stringify({ ...state, items: headTail(mid) }).length <= PAGE_STATE_TAB_CAP_BYTES) {
         lo = mid;
       } else {
         hi = mid - 1;
       }
     }
-    items = items.slice(0, lo);
+    items = headTail(lo);
     truncated = true;
     raw = JSON.stringify({ ...state, items });
     logger.warn("pagestate: snapshot truncated to fit cap", {

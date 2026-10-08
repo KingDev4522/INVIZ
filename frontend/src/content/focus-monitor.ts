@@ -41,6 +41,10 @@ const ROLE_LABELS: Record<string, { en: string; hi: string }> = {
   navigation: { en: "Navigation", hi: "नेविगेशन" },
   main: { en: "Main content", hi: "मुख्य सामग्री" },
   form: { en: "Form", hi: "फ़ॉर्म" },
+  // Hover-only role for readable text blocks (paragraphs, cards). The
+  // keyboard path never produces it (generic is excluded before announcement),
+  // so adding it cannot change focus narration.
+  text: { en: "Text", hi: "पाठ" },
 };
 
 const HINTS: Record<string, { en: (name: string) => string; hi: (name: string) => string }> = {
@@ -203,6 +207,146 @@ function isNativelyFocusableTag(el: Element): boolean {
   );
 }
 
+// --- Hover (cursor-aware) narration -----------------------------------------
+// The keyboard path above answers "what received focus". Hover answers "what
+// is under the cursor" — focusability is irrelevant there, so this is a
+// separate eligibility path sharing the same announcement builder, dedupe,
+// branding suppression and text pipeline (accessible name first, visible text
+// otherwise). Deliberately dependency-free (DOM APIs only): focus-monitor
+// stays importable without the extractor modules.
+
+/** Cap for hover-read text (matches the accessible-name cap). */
+export const HOVER_TEXT_MAX_CHARS = 200;
+/** Ancestor levels climbed looking for a readable block (card/container). */
+const HOVER_CLIMB_MAX = 4;
+/** Never read page furniture or code as hover text. */
+const HOVER_SKIP_SELECTOR = "script,style,noscript,template,option,select";
+
+function collapseHoverText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/** Visible-text candidate for one element ("" = nothing worth reading). */
+function hoverTextOf(el: Element): string {
+  const tag = el.tagName.toLowerCase();
+  if (tag === "html" || tag === "body") return "";
+  if (el.closest(HOVER_SKIP_SELECTOR) !== null) return "";
+  // The cursor is on laid-out content; still refuse anything explicitly
+  // hidden so collapsed/honeypot text is never narrated.
+  if (el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true") return "";
+  return collapseHoverText(el.textContent ?? "").slice(0, HOVER_TEXT_MAX_CHARS);
+}
+
+export interface HoverTarget {
+  element: Element;
+  name: string;
+  role: string;
+}
+
+/**
+ * Resolves what a hovered element should narrate (null = stay silent).
+ *
+ * Order: focusable named widgets behave exactly as on keyboard focus;
+ * named-but-unfocusable elements (headings, images with alt, other labelled
+ * content) narrate their own name; unnamed elements resolve to the nearest
+ * readable block (paragraph, card, container) WITHOUT reading the page —
+ * the climb stops after HOVER_CLIMB_MAX levels and never leaves for
+ * body/html. Brand chrome stays silent (same rule as focus).
+ */
+export function resolveHoverTarget(el: Element, role: string, name: string): HoverTarget | null {
+  const structural = role === "generic" || role === "none" || role === "presentation";
+  if (!structural && name.trim() !== "") {
+    // Named content under the cursor: headings, images with alt text,
+    // labelled widgets — focusability deliberately not consulted.
+    return { element: el, name: name.trim().slice(0, HOVER_TEXT_MAX_CHARS), role };
+  }
+  // Structural wrappers (div/span/...) and unnamed elements: resolve to the
+  // nearest readable block (paragraph, card, container) WITHOUT reading the
+  // page — the climb stops after HOVER_CLIMB_MAX levels and never reaches
+  // body/html. Brand chrome stays silent (same rule as focus).
+  let node: Element | null = el;
+  for (let level = 0; level <= HOVER_CLIMB_MAX && node !== null; level += 1) {
+    const text = hoverTextOf(node);
+    if (text !== "") return { element: node, name: text, role: "text" };
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Composed-tree ancestor check. `Node.contains` does NOT pierce shadow DOM
+ * (host.contains(shadowInner) is false), so a plain `contains` guard would
+ * reject the very shadow-descend the hover path exists for. This walks the
+ * composed tree instead: closed shadow roots terminate the walk at their
+ * host (unreachable by design — same as assistive technology).
+ */
+export function isDescendantComposed(ancestor: Element, node: Element): boolean {
+  let current: Node | null = node;
+  while (current !== null) {
+    if (current === ancestor) return true;
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot ? root.host : current.parentElement;
+  }
+  return false;
+}
+
+export interface HoverClock {
+  now(): number;
+  schedule(fn: () => void, ms: number): void;
+}
+
+const SYSTEM_HOVER_CLOCK: HoverClock = {
+  now: () => Date.now(),
+  schedule: (fn, ms) => {
+    setTimeout(fn, ms);
+  },
+};
+
+/**
+ * Rapid-movement coalescer with trailing-edge guarantee.
+ *
+ * The old handler DROPPED every event within 600ms of the previous one, so a
+ * fast-moving cursor skipped most content. This processes slow movement
+ * immediately (same cadence as before) and coalesces bursts: intermediate
+ * targets may be skipped, but the LATEST target is always flushed after the
+ * settle delay. TTS spam is prevented downstream (priority-5 focus-takeover
+ * speaks only the newest + signature dedupe), never here.
+ */
+export class HoverCoalescer {
+  private pending: Element | null = null;
+  private lastProcessAt = 0;
+  private scheduled = false;
+
+  constructor(
+    private readonly process: (el: Element) => void,
+    private readonly clock: HoverClock = SYSTEM_HOVER_CLOCK,
+    private readonly immediateMs = 600,
+    private readonly settleMs = 250,
+  ) {}
+
+  push(el: Element): void {
+    this.pending = el;
+    if (this.clock.now() - this.lastProcessAt >= this.immediateMs) {
+      this.flush();
+      return;
+    }
+    if (this.scheduled) return; // a flush is already queued; latest wins
+    this.scheduled = true;
+    this.clock.schedule(() => {
+      this.scheduled = false;
+      this.flush();
+    }, this.settleMs);
+  }
+
+  private flush(): void {
+    const el = this.pending;
+    this.pending = null;
+    if (el === null) return;
+    this.lastProcessAt = this.clock.now();
+    this.process(el);
+  }
+}
+
 export type AnnouncementListener = (a: Announcement) => void;
 
 export class FocusMonitor {
@@ -250,6 +394,35 @@ export class FocusMonitor {
       role: resolved.role,
       states: resolved.states,
       element: el,
+      lang: this.lang,
+      verbosity: this.verbosity,
+    });
+    if (announcement.signature === this.lastSignature) return null; // dedupe
+    this.lastSignature = announcement.signature;
+    this.listeners.forEach((cb) => cb(announcement));
+    return announcement;
+  }
+
+  /**
+   * Cursor-aware entry point: process one hovered element.
+   *
+   * Unlike handleFocus, keyboard focusability is NOT required — the cursor is
+   * already on the content, so headings, plain text, images with alt text and
+   * readable containers are all legitimate narration targets. Brand/chrome
+   * suppression, empty-content silence and cross-announcement dedupe are kept.
+   */
+  handleHover(el: Element): Announcement | null {
+    const resolved = this.resolve(el);
+    if (resolved === null) return null;
+    if (isSiteBranding(el, resolved.role, resolved.name)) return null;
+    const target = resolveHoverTarget(el, resolved.role, resolved.name);
+    if (target === null) return null;
+    const announcement = buildAnnouncement({
+      elementId: resolved.elementId,
+      name: target.name,
+      role: target.role,
+      states: resolved.states,
+      element: target.element,
       lang: this.lang,
       verbosity: this.verbosity,
     });

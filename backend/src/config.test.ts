@@ -66,6 +66,7 @@ describe("loadConfig", () => {
     } as NodeJS.ProcessEnv);
     expect(Object.keys(config).sort()).toEqual([
       "backendToken",
+      "contextMode",
       "groqKeys",
       "llmProvider",
       "ollamaKeepAlive",
@@ -142,6 +143,33 @@ describe("loadConfig", () => {
       loadConfig({ ...base, OLLAMA_KEEP_ALIVE: "30m" } as NodeJS.ProcessEnv).ollamaKeepAlive,
     ).toBe("30m");
     expect(loadConfig(base as NodeJS.ProcessEnv).ollamaKeepAlive).toBe("");
+  });
+
+  it("CONTEXT_MODE defaults to dom and never silently enables the experiment", () => {
+    const base = { GROQ_API_KEYS: "k", TAVILY_API_KEY: "t", PORT: "8787" };
+    // The production default: no CONTEXT_MODE in the environment at all.
+    expect(loadConfig(base as NodeJS.ProcessEnv).contextMode).toBe("dom");
+    // Explicit opt-in is honoured (case/whitespace tolerant).
+    expect(
+      loadConfig({ ...base, CONTEXT_MODE: "hybrid" } as NodeJS.ProcessEnv).contextMode,
+    ).toBe("hybrid");
+    expect(
+      loadConfig({ ...base, CONTEXT_MODE: " HYBRID " } as NodeJS.ProcessEnv).contextMode,
+    ).toBe("hybrid");
+    // A typo fails OPEN to dom — an experiment can never be enabled by accident.
+    for (const bad of ["domm", "vision", "true", "", "auto"]) {
+      expect(loadConfig({ ...base, CONTEXT_MODE: bad } as NodeJS.ProcessEnv).contextMode).toBe("dom");
+    }
+  });
+
+  it("summarizes the context mode (non-secret)", () => {
+    const base = { GROQ_API_KEYS: "k", TAVILY_API_KEY: "t", PORT: "8787" };
+    expect(configSummary(loadConfig(base as NodeJS.ProcessEnv))["contextMode"]).toBe("dom");
+    expect(
+      configSummary(loadConfig({ ...base, CONTEXT_MODE: "hybrid" } as NodeJS.ProcessEnv))[
+        "contextMode"
+      ],
+    ).toBe("hybrid");
   });
 
   it("rejects bad ports", () => {

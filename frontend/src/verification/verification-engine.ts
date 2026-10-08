@@ -165,6 +165,27 @@ export async function verify(request: VerifyRequest): Promise<VerificationResult
       },
     });
   } catch {
+    if (
+      (request.expect.type === "navigation_completed" || request.expect.type === "url_changed") &&
+      typeof chrome !== "undefined" &&
+      typeof chrome.tabs?.get === "function"
+    ) {
+      try {
+        const tab = await chrome.tabs.get(request.tabId);
+        if (tab?.url !== undefined && tab.url !== request.urlBefore) {
+          return {
+            success: true,
+            outcome: "VERIFIED_SUCCESS",
+            expected: request.expect,
+            observed: { url: tab.url },
+            timedOut: false,
+            pageGeneration: request.actionGeneration,
+          };
+        }
+      } catch {
+        // ignore and report unreachable
+      }
+    }
     logger.error("verify: tab unreachable", { errorCode: "CANNOT_ACCESS_PAGE" });
     return {
       success: false,

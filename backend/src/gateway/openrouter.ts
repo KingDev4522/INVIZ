@@ -1,8 +1,8 @@
 /**
  * OpenRouter chat client — REAL, live openrouter.ai (second reasoning vendor).
  * Server-side only: holds the OpenRouter key, speaks OpenAI-compatible
- * chat/completions, maps outcomes to GatewayError so reasonOnce can
- * round-robin + fail over between vendors inside a single call.
+ * chat/completions, maps outcomes to GatewayError so reasonOnce can fail over
+ * between vendors inside a single call (bounded standby chain, never rotation).
  * Bounded: at most 1 + maxRetries attempts, Retry-After honored on 429,
  * 4xx (except 429) never retried.
  */

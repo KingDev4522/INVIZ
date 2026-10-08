@@ -183,6 +183,33 @@ describe("reasonOnce — contract retry", () => {
     __resetReasoningRotation();
   });
 
+  it("reports 429 when quota died first even if the last provider fumbled the contract", async () => {
+    __resetReasoningRotation();
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(url);
+      if (url.includes("openrouter.ai")) {
+        return { ok: false, status: 429, headers: { get: () => null }, text: async () => "slow" };
+      }
+      // Groq answers 200 with prose twice: contract violation, not quota.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: "still prose" } }] }),
+      };
+    }) as unknown as typeof fetch;
+    const or = { apiKey: "or-test-key", model: "m" };
+    const err = await reasonOnce({ userPayload: "go", pool: POOL, openrouter: or, fetchImpl }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(QwenError);
+    expect((err as QwenError).httpStatus).toBe(429);
+    expect(urls.some((u) => u.includes("openrouter.ai"))).toBe(true);
+    expect(urls.some((u) => u.includes("api.groq.com"))).toBe(true);
+    __resetReasoningRotation();
+  });
+
   it("does not retry a contract violation that is actually a smuggled action", async () => {
     const { fetchImpl, calls } = stubFetch([
       JSON.stringify({

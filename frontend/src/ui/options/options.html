@@ -2,81 +2,141 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="INVIZ extension options: backend connection, microphone setup, and voice diagnostics." />
     <link rel="stylesheet" href="../ui.css" />
+    <link rel="stylesheet" href="./options.css" />
     <title>INVIZ — Options</title>
   </head>
-  <body>
-    <main>
-      <h1>Options &amp; backend connection</h1>
-      <p>
-        This extension holds <strong>no provider keys</strong>. All AI traffic
-        goes through your INVIZ backend, which holds the keys server-side.
-        Only the backend address (and an optional access token, if your backend
-        requires one) are stored here, on this machine.
-      </p>
-
-      <section aria-labelledby="backend-h">
-        <h2 id="backend-h">INVIZ backend</h2>
-        <label for="backend-url">Backend URL</label>
-        <input id="backend-url" type="text" size="60" autocomplete="off" spellcheck="false"
-          placeholder="http://127.0.0.1:8787" />
-        <label for="backend-token">Backend token (only if your backend sets BACKEND_TOKEN)</label>
-        <input id="backend-token" type="password" size="60" autocomplete="off" spellcheck="false" />
-        <div>
-          <button id="validate-backend" type="button">Validate backend (live)</button>
-          <span id="backend-result" role="status"></span>
-        </div>
-        <p>
-          Validation checks the backend is reachable, then runs its own provider
-          smoke checks (Groq models + Gemini synthesis) and reports each result.
+  <body class="options-page">
+    <div class="options-shell">
+      <main>
+        <p class="options-eyebrow">INVIZ · Setup</p>
+        <h1 class="options-title">Options &amp; backend connection</h1>
+        <p class="options-lede">
+          This extension holds <strong>no provider keys</strong>. All AI traffic
+          goes through your INVIZ backend, which holds the keys server-side.
+          Only the backend address (and an optional access token, if your backend
+          requires one) are stored here, on this machine.
         </p>
-      </section>
 
-      <section aria-labelledby="mic-h">
-        <h2 id="mic-h">Microphone</h2>
-        <div>
-          <button id="enable-mic" type="button">Enable microphone</button>
-          <button id="test-mic" type="button">Test microphone (3s)</button>
-          <span id="mic-result" role="status"></span>
+        <section class="options-card" aria-labelledby="backend-h">
+          <div class="options-card-head">
+            <span class="options-index" aria-hidden="true">01</span>
+            <h2 id="backend-h">INVIZ backend</h2>
+          </div>
+          <div class="options-field">
+            <label for="backend-url">Backend URL</label>
+            <input id="backend-url" type="text" autocomplete="off" spellcheck="false"
+              placeholder="http://127.0.0.1:8787" />
+          </div>
+          <div class="options-field">
+            <label for="backend-token">Backend token (only if your backend sets BACKEND_TOKEN)</label>
+            <input id="backend-token" type="password" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="options-actions">
+            <button id="validate-backend" class="options-btn options-btn-primary" type="button">Validate backend</button>
+            <span id="backend-result" class="options-status" role="status"></span>
+          </div>
+          <p>
+            Validation checks the backend is reachable, then runs its own provider
+            smoke checks (Groq models + Gemini synthesis) and reports each result.
+          </p>
+        </section>
+
+        <section class="options-card" aria-labelledby="mic-h">
+          <div class="options-card-head">
+            <span class="options-index" aria-hidden="true">02</span>
+            <h2 id="mic-h">Microphone</h2>
+          </div>
+          <div class="options-actions">
+            <button id="enable-mic" class="options-btn" type="button">Enable microphone</button>
+            <button id="test-mic" class="options-btn" type="button">Test microphone (3s)</button>
+            <span id="mic-result" class="options-status" role="status"></span>
+          </div>
+          <p>
+            The test opens your mic for 3 seconds and reports the loudest level
+            it heard. Speak while it listens: a level above ~2% means the mic
+            works and voice capture should too.
+          </p>
+        </section>
+
+        <section class="options-card" aria-labelledby="diag-h">
+          <div class="options-card-head">
+            <span class="options-index" aria-hidden="true">03</span>
+            <h2 id="diag-h">Voice diagnostics</h2>
+          </div>
+          <div class="options-actions">
+            <button id="run-diag" class="options-btn" type="button">Run voice diagnostics</button>
+          </div>
+          <p>
+            Runs each voice layer in order and reports PASS/FAIL in plain words:
+            offscreen capture, backend reachability, this page's mic, and a live
+            transcription of a short clip. Speak during steps 1 and 3.
+          </p>
+          <pre id="diag-result" class="options-console" role="status"></pre>
+        </section>
+
+        <section class="options-card" aria-labelledby="activity-h">
+          <div class="options-card-head">
+            <span class="options-index" aria-hidden="true">04</span>
+            <h2 id="activity-h">Recent voice activity</h2>
+          </div>
+          <div class="options-actions">
+            <button id="refresh-diag" class="options-btn" type="button">Refresh</button>
+            <button id="clear-diag" class="options-btn" type="button">Clear</button>
+          </div>
+          <p>
+            The last voice turns on this machine, newest first — what the mic
+            delivered and exactly why any turn failed. No DevTools needed.
+          </p>
+          <pre id="diag-log" class="options-console" role="status"></pre>
+        </section>
+
+        <section class="options-card" aria-labelledby="profile-h">
+          <div class="options-card-head">
+            <span class="options-index" aria-hidden="true">05</span>
+            <h2 id="profile-h">My details</h2>
+          </div>
+          <div class="options-field">
+            <label for="profile-name">Full name</label>
+            <input id="profile-name" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Your name" />
+          </div>
+          <div class="options-field">
+            <label for="profile-email">Email</label>
+            <input id="profile-email" type="email" autocomplete="off" spellcheck="false"
+              placeholder="you@example.com" />
+          </div>
+          <div class="options-field">
+            <label for="profile-phone">Phone number</label>
+            <input id="profile-phone" type="tel" autocomplete="off" spellcheck="false"
+              placeholder="+91 …" />
+          </div>
+          <div class="options-field">
+            <label for="profile-address">Address</label>
+            <input id="profile-address" type="text" autocomplete="off" spellcheck="false"
+              placeholder="Street, city" />
+          </div>
+          <div class="options-actions">
+            <button id="save-profile" class="options-btn options-btn-primary" type="button">Save details</button>
+            <button id="clear-profile" class="options-btn" type="button">Clear</button>
+            <span id="profile-result" class="options-status" role="status"></span>
+          </div>
+          <p>
+            Saved on this machine only. When you say “fill in my details”,
+            the agent types these into matching form fields — no asking again.
+            Never store passwords, OTPs, or card numbers here; the agent
+            always asks for those separately and forgets them immediately.
+          </p>
+        </section>
+
+        <div class="options-footer">
+          <button id="save" class="options-btn options-btn-primary" type="button">Save on this machine</button>
+          <span id="save-result" class="options-status" role="status"></span>
         </div>
-        <p>
-          The test opens your mic for 3 seconds and reports the loudest level
-          it heard. Speak while it listens: a level above ~2% means the mic
-          works and voice capture should too.
-        </p>
-      </section>
-
-      <section aria-labelledby="diag-h">
-        <h2 id="diag-h">Voice diagnostics</h2>
-        <div>
-          <button id="run-diag" type="button">Run voice diagnostics</button>
-        </div>
-        <p>
-          Runs each voice layer in order and reports PASS/FAIL in plain words:
-          offscreen capture, backend reachability, this page's mic, and a live
-          transcription of a short clip. Speak during steps 1 and 3.
-        </p>
-        <pre id="diag-result" role="status"></pre>
-      </section>
-
-      <section aria-labelledby="activity-h">
-        <h2 id="activity-h">Recent voice activity</h2>
-        <div>
-          <button id="refresh-diag" type="button">Refresh</button>
-          <button id="clear-diag" type="button">Clear</button>
-        </div>
-        <p>
-          The last voice turns on this machine, newest first — what the mic
-          delivered and exactly why any turn failed. No DevTools needed.
-        </p>
-        <pre id="diag-log" role="status"></pre>
-      </section>
-
-      <div>
-        <button id="save" type="button">Save on this machine</button>
-        <span id="save-result" role="status"></span>
-      </div>
-    </main>
+      </main>
+    </div>
     <script type="module" src="./options.js"></script>
   </body>
 </html>

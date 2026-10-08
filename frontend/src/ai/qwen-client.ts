@@ -9,6 +9,7 @@ import {
   BackendError,
   ENDPOINTS,
   type BackendRef,
+  type HybridScreenshot,
 } from "../../../shared/api.js";
 import {
   validateModelOutput,
@@ -36,6 +37,19 @@ export interface ReasonInput {
   fetchImpl?: typeof fetch;
   /** Voice-turn correlation id, carried into logs and the backend body. */
   turnId?: string;
+  /**
+   * Phase 2 per-task cancellation. Aborting rejects the in-flight /v1/chat
+   * fetch promptly (the controller discards the result silently). Composed
+   * with the timeout below — whichever fires first wins; no behavior change
+   * when absent.
+   */
+  signal?: AbortSignal;
+  /**
+   * EXPERIMENTAL hybrid context (CONTEXT_MODE=hybrid only). Omitted entirely
+   * on the default path, and the backend drops it when its own CONTEXT_MODE is
+   * "dom" — so this can never alter production behaviour by itself.
+   */
+  image?: HybridScreenshot;
 }
 
 /** Why a reasoning call failed, so callers can speak an honest message. */
@@ -74,6 +88,9 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
     () => controller.abort(),
     input.timeoutMs ?? 45000,
   );
+  // User cancellation composes with the timeout: either aborts the fetch.
+  const onExternalAbort = (): void => controller.abort();
+  input.signal?.addEventListener("abort", onExternalAbort, { once: true });
   const turnId = input.turnId ?? "no-turn";
   // Payload CONTENT is never logged (page text + user intent); length proves a
   // real reasoning call was made without leaking either.
@@ -84,6 +101,9 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
     attempt: 1,
     maxAttempts: MAX_REASON_ATTEMPTS,
     payloadChars: input.userPayload.length,
+    ...(input.image !== undefined
+      ? { hybridImageBytes: input.image.bytes, hybridImageWidth: input.image.width, hybridImageHeight: input.image.height }
+      : {}),
   });
   let res: Response;
   try {
@@ -98,6 +118,7 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
           ? { maxCompletionTokens: input.maxCompletionTokens }
           : {}),
         ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        ...(input.image !== undefined ? { image: input.image } : {}),
       }),
       signal: controller.signal,
     });
@@ -113,6 +134,7 @@ export async function reasonOnce(input: ReasonInput): Promise<AgentOutcome> {
     throw new QwenError("reasoning transport failed", false, "transport");
   } finally {
     clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", onExternalAbort);
   }
   if (res.status === 429) {
     // Shared budget spent: surface, do not re-request. The agent speaks the

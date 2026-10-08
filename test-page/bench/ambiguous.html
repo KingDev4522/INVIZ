@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bench A — Duplicate labels (vision disambiguation)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f6f7f9; color: #1b1f24; }
+      h1 { font-size: 20px; }
+      .plans { display: flex; gap: 16px; margin: 16px 0 32px; }
+      .card { background: #fff; border: 1px solid #d8dce1; border-radius: 12px; padding: 20px; width: 220px; }
+      .card.popular { border: 3px solid #1a7f37; position: relative; }
+      .badge { position: absolute; top: -14px; left: 16px; background: #1a7f37; color: #fff; font-size: 12px; font-weight: 700; border-radius: 20px; padding: 3px 12px; }
+      .card h2 { margin: 0 0 4px; font-size: 17px; }
+      .price { font-size: 24px; font-weight: 700; margin: 8px 0 16px; }
+      .card button { width: 100%; border-radius: 8px; padding: 10px; font-size: 15px; cursor: pointer; border: 1px solid #d8dce1; background: #fff; }
+      .card.popular button { background: #1a7f37; border-color: #1a7f37; color: #fff; }
+      section.stories { background: #fff; border: 1px solid #d8dce1; border-radius: 12px; padding: 20px; max-width: 560px; margin-bottom: 24px; }
+      section.stories h2 { margin-top: 0; }
+      a.more { color: #1463ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Choose a plan</h1>
+    <!-- Two cards with IDENTICAL "Select" buttons. The DOM registry shows two
+         indistinguishable `button "Select"` lines (serializePage even folds
+         them); only the screenshot shows which one is the green highlighted
+         "Most popular" card. -->
+    <div class="plans">
+      <div class="card">
+        <h2>Starter</h2>
+        <div class="price">$0</div>
+        <p>For trying things out.</p>
+        <button type="button" data-bench="select-starter">Select</button>
+      </div>
+      <div class="card popular">
+        <span class="badge">Most popular</span>
+        <h2>Pro</h2>
+        <div class="price">$12</div>
+        <p>For everyday work.</p>
+        <button type="button" data-bench="select-popular">Select</button>
+      </div>
+    </div>
+    <section class="stories" aria-labelledby="feat-h">
+      <h2 id="feat-h">Features</h2>
+      <p>Everything in Starter, plus priority support and history.</p>
+      <a class="more" href="#features" data-bench="features-more">Read more</a>
+    </section>
+    <section class="stories" aria-labelledby="cust-h">
+      <h2 id="cust-h">Customer stories</h2>
+      <p>Teams describe how they run their day on Pro.</p>
+      <a class="more" href="#stories" data-bench="stories-more">Read more</a>
+    </section>
+  </body>
+</html>

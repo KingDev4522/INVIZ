@@ -5,7 +5,7 @@
  * Run: npm test
  */
 import { describe, expect, it } from "vitest";
-import { AgentController, resolveOpenSiteDestination, type PageSnapshotLike } from "./controller.js";
+import { AgentController, resolveOpenSiteDestination, resolveOpenSitePrefix, type PageSnapshotLike } from "./controller.js";
 
 import type { ReasonInput } from "../../ai/qwen-client.js";
 import type { AgentOutcome, ExecutionResult } from "../../../../shared/types.js";
@@ -47,6 +47,7 @@ interface Harness {
   saved: TaskSnapshot[];
   current: () => TaskSnapshot | null;
   executed: Array<{ action: string; target?: string; value?: string; url?: string }>;
+  settleCalls: Array<{ tabId: number; url: string }>;
   reasonCalls: () => number;
   advance: (ms: number) => void;
 }
@@ -64,12 +65,17 @@ function makeHarness(opts: {
   };
   nowStart?: number;
   focused?: { text: string; name: string; role: string } | null;
+  /** When set, injects a post-navigation settle stub returning this value. */
+  settleResult?: boolean;
+  /** Trusted-operator mode: safety gates bypassed (correctness BLOCKs stay). */
+  powerMode?: boolean;
 } = {}): Harness {
   let now = opts.nowStart ?? 1_000_000;
   const spoken: Harness["spoken"] = [];
   const saved: TaskSnapshot[] = [];
   let current: TaskSnapshot | null = null;
   const executed: Harness["executed"] = [];
+  const settleCalls: Harness["settleCalls"] = [];
   let reasonCalls = 0;
   const queue = Array.isArray(opts.outcomes) ? [...opts.outcomes] : null;
 
@@ -86,6 +92,7 @@ function makeHarness(opts: {
 
   const controller = new AgentController({
     backend: { url: "http://127.0.0.1:8787" },
+    ...(opts.powerMode === true ? { powerMode: true as const } : {}),
     reason,
     executeFn: async (action) => {
       const params = action.parameters as { url?: unknown } | undefined;
@@ -110,6 +117,14 @@ function makeHarness(opts: {
     stopAudio: async () => undefined,
     setAgentActive: async () => undefined,
     loadSnapshot: async () => SNAPSHOT,
+    ...(opts.settleResult !== undefined
+      ? {
+          waitForSettledSnapshot: async (tabId: number, url: string) => {
+            settleCalls.push({ tabId, url });
+            return opts.settleResult as boolean;
+          },
+        }
+      : {}),
     loadLayerB: async () => ({
       interpretation: "An application page.",
       pageGeneration: 42,
@@ -139,6 +154,7 @@ function makeHarness(opts: {
     saved,
     current: () => current,
     executed,
+    settleCalls,
     reasonCalls: () => reasonCalls,
     advance: (ms: number) => {
       now += ms;
@@ -218,6 +234,122 @@ describe("Q&A and simple action flows", () => {
       expect(nav?.url).toBe("https://github.com/");
       expect(h.reasonCalls()).toBe(1);
       expect(h.current()?.status).toBe("COMPLETE");
+    });
+
+    describe("compound-goal navigation prefix", () => {
+      it("resolves a leading open-site command with leftover work", () => {
+        expect(resolveOpenSitePrefix("open YouTube and find music")).toEqual({
+          url: "https://www.youtube.com/",
+          rest: "and find music",
+        });
+        expect(resolveOpenSitePrefix("please go to github and show trending")).toEqual({
+          url: "https://github.com/",
+          rest: "and show trending",
+        });
+        expect(resolveOpenSitePrefix("open www.youtube.com, play lofi")).toEqual({
+          url: "https://www.youtube.com/",
+          rest: "play lofi",
+        });
+      });
+
+      it("leaves bare commands and non-site goals alone", () => {
+        expect(resolveOpenSitePrefix("open YouTube")).toBeNull();
+        expect(resolveOpenSitePrefix("open the thinking-orbs repository")).toBeNull();
+        expect(resolveOpenSitePrefix("search YouTube for cats")).toBeNull();
+        expect(resolveOpenSitePrefix("don't open youtube please")).toBeNull();
+        expect(resolveOpenSitePrefix("open youtubemusic and play")).toBeNull();
+      });
+
+      it("navigates first, then reasons over the fresh page toward the full goal", async () => {
+        const h = makeHarness({
+          outcomes: [{ type: "task_complete", text: "Done." }],
+        });
+        await h.controller.routeVoice(voice("open YouTube and find music"), 7);
+        // Deterministic first step: no reasoning spent on the navigation.
+        expect(h.executed[0]).toEqual({ action: "navigate", target: undefined, value: undefined, url: "https://www.youtube.com/" });
+        // The task stays alive: exactly one reasoning call resolves the rest.
+        expect(h.reasonCalls()).toBe(1);
+        expect(h.current()?.status).toBe("COMPLETE");
+        expect(h.current()?.completedActions).toBe(1);
+      });
+    });
+
+    describe("post-navigation snapshot settle", () => {
+      const NAVIGATE_THEN_DONE: AgentOutcome[] = [
+        {
+          type: "action",
+          action: {
+            action: "navigate",
+            parameters: { url: "https://www.youtube.com/" },
+            expect: { type: "navigation_completed" },
+          },
+        },
+        { type: "task_complete", text: "Done." },
+      ];
+
+      it("waits for the navigated page snapshot before continuing", async () => {
+        const h = makeHarness({ settleResult: true, outcomes: NAVIGATE_THEN_DONE });
+        await h.controller.routeVoice(voice("find music videos"), 7);
+        expect(h.settleCalls).toEqual([{ tabId: 7, url: "https://www.youtube.com/" }]);
+        expect(h.current()?.status).toBe("COMPLETE");
+      });
+
+      it("warns the next step instead of wedging when the snapshot never arrives", async () => {
+        const h = makeHarness({ settleResult: false, outcomes: NAVIGATE_THEN_DONE });
+        await h.controller.routeVoice(voice("find music videos"), 7);
+        expect(h.settleCalls).toHaveLength(1);
+        expect(h.current()?.status).toBe("COMPLETE");
+        expect(h.current()?.lastVerifiedResult ?? "").toContain("re-observe before acting");
+      });
+
+      it("power mode executes a submit click with no confirmation gate", async () => {
+        const h = makeHarness({
+          powerMode: true,
+          outcomes: [
+            {
+              type: "action",
+              action: { action: "click", target: "e2", pageGeneration: 42 },
+            },
+            { type: "task_complete", text: "Done." },
+          ],
+        });
+        await h.controller.routeVoice(voice("Submit it."), 7);
+        // e2 is submit-classified ("Submit Application" button): default
+        // policy would park the task in WAITING_FOR_CONFIRMATION.
+        expect(h.executed.map((e) => e.action)).toEqual(["click"]);
+        expect(h.current()?.status).toBe("COMPLETE");
+      });
+
+      it("default policy still gates the same submit click", async () => {
+        const h = makeHarness({
+          outcomes: [
+            {
+              type: "action",
+              action: { action: "click", target: "e2", pageGeneration: 42 },
+            },
+            { type: "task_complete", text: "Done." },
+          ],
+        });
+        await h.controller.routeVoice(voice("Submit it."), 7);
+        expect(h.executed).toEqual([]);
+        expect(h.current()?.status).toBe("WAITING_FOR_CONFIRMATION");
+      });
+
+      it("skips the wait entirely for non-navigation actions", async () => {
+        const h = makeHarness({
+          settleResult: true,
+          outcomes: [
+            {
+              type: "action",
+              action: { action: "click", target: "e1", pageGeneration: 42 },
+            },
+            { type: "task_complete", text: "Done." },
+          ],
+        });
+        await h.controller.routeVoice(voice("Open the form."), 7);
+        expect(h.settleCalls).toEqual([]);
+        expect(h.current()?.status).toBe("COMPLETE");
+      });
     });
 
     it("still routes named repositories through the model", async () => {

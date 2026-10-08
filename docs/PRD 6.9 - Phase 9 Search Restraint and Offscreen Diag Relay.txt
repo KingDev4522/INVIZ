@@ -1,0 +1,70 @@
+# PRD 6.9 — Phase 9: Search Restraint & Offscreen Diagnostics Relay
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.9 — Phase 9 Implementation (Search Restraint & Offscreen Diagnostics Relay)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 9.
+**Objective:** The model searches the web only when the page cannot answer and navigation cannot satisfy the goal — never for trivial/navigational work — enforced both in the prompt and deterministically in code; and offscreen voice diagnostics are never lost even though the offscreen document has no dependable chrome.storage access. Every Tavily credit is budgeted, every refusal is observable, every diag line reaches the Options page.
+
+> Cost driver: Tavily `basic` depth = 1 credit/search. The model previously searched vigorously with no ordering, no never-search cases, and no per-task cap. The prompt alone does not bind a small local model, so the controller enforces the same rule at runtime.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.5 exit green (agent runtime routing voice turns; `doWebSearch` feeds results into `lastVerifiedResult`).
+- Deterministic open-site navigation exists (`resolveOpenSiteDestination` / `resolveOpenSitePrefix`, `OPEN_SITE_ALLOWLIST`) for first-step bare open-site goals.
+- Offscreen voice log exists (`shared/diag.ts` ring buffer, `DIAG_KEY`, Options page renders it) but writes from the offscreen document are unreliable.
+
+## 1. WORK ITEMS
+
+### 1.1 Search-need decision in SYSTEM_PROMPT_V1 — REAL (backend/src/ai/schemas.ts)
+
+- The `web_search` outcome line is replaced with an ordered decision procedure applied BEFORE any `web_search`:
+  1) If the page state (ELEMENTS/PROSE) or a prior verified search observation already answers the goal, answer or act from it — NEVER search.
+  2) If the goal is navigational or trivially deterministic (open/go to/visit/launch a named site or page), navigate/open_tab DIRECTLY to the known address — NEVER search to find it.
+  3) Search ONLY when the goal needs fresh or external factual information the page cannot supply AND no prior search observation covers it. Then at most ONE `web_search` with the shortest sufficient query.
+- Results return as verified observations; the model navigates/open_tabs ONLY to a URL from those observations, or answers from them. NEVER invent result URLs. NEVER repeat a search with the same or near-same query; NEVER search twice in a row without an intervening answer or navigate.
+- `SYSTEM_PROMPT_VERSION` stays `v1` (content change only; no consumer branches on the version).
+
+### 1.2 Deterministic search gate in doWebSearch — REAL (frontend/src/background/agent-controller/controller.ts)
+
+- Gate runs BEFORE any Tavily call, in order; refusals never spend a credit and the refusal text becomes `task.lastVerifiedResult` so the next reasoning step observes it:
+  a) empty query → existing refusal path (unchanged).
+  b) navigational (`isNavigationalSearchRefusal(task.goal, query)`): goal matches `^(please )?(open|go to|goto|launch|visit|take me to|show me)` AND the query is a site-name-like request (≤2 normalized tokens, or names an `OPEN_SITE_ALLOWLIST` key) → refuse: "web search refused: navigational request — navigate directly to the site instead of searching".
+  c) duplicate (`normalizeSearchQuery(query)` already in `task.searchedQueries`) → refuse: "web search refused: ... already searched — answer from the earlier observations or navigate to one of their URLs".
+  d) budget (`(task.searchCount ?? 0) >= MAX_SEARCHES_PER_TASK`) → refuse: "web search refused: search budget spent — answer from the earlier observations or navigate to one of their URLs".
+- Each refusal increments `task.recoveryAttempts` (repeat violations trip the existing recovery budget instead of looping forever), persists the task, and logs `agent: web search refused (<reason>)` with `{taskId, turnId?, query≤120ch}`.
+- Passing the gate spends one budget unit in memory (`task.searchCount + 1`, query appended to `task.searchedQueries`); the existing per-branch `store.save(task)` calls persist it on every path that reached Tavily (results, empty, error).
+- Helpers `normalizeSearchQuery` (lowercase, punctuation-stripped incl. Devanagari range, whitespace-collapsed) and `isNavigationalSearchRefusal` are exported for unit tests. Genuine information needs (e.g. goal "find me pizza", query "pizza") MUST still pass: the goal is not navigational, the query is fresh, budget remains.
+
+### 1.3 Budget constant + task accounting — REAL (shared/constants.ts; frontend/src/background/task-state/store.ts)
+
+- `MAX_SEARCHES_PER_TASK = 2`: at most two Tavily calls per task — one search plus one refinement. Changing it is a design change (PRD 6 §4 rule: amend here first).
+- `TaskSnapshot` gains optional `searchCount?: number` and `searchedQueries?: string[]` (optional so persisted tasks from older builds still load; absent means zero). Fresh tasks initialize both (`searchCount: 0`, `searchedQueries: []`).
+
+### 1.4 Offscreen voice-log relay VOICE_DIAG — REAL (frontend/src/offscreen/offscreen.ts; frontend/src/background/service-worker.ts; shared/messages.ts)
+
+- Problem: `appendDiag()` wrote `chrome.storage.local` directly from the offscreen document, which has no dependable storage access — the write threw, the entry was dropped, and the console filled with `diag: chrome.storage unavailable ...` warnings.
+- `appendDiag()` now tries the direct write (best-effort, unchanged shape) and falls back to fire-and-forget `VOICE_DIAG {kind, text}` to the worker — the single storage owner — which validates (`kind`/`text` non-empty strings, capped 32/500 chars), appends via `pushDiag`, and persists the ring buffer the Options page renders.
+- `VOICE_DIAG` added to `MESSAGE_TYPES`; the offscreen listener ignores its own relay echoes (same pattern as `VOICE_STATUS`/`START_VOICE_TURN`); the worker handler responds `{ok:true}` / schema-failure without ever touching audio.
+
+### 1.5 Log hygiene — REAL (frontend/src/offscreen/offscreen.ts; frontend/src/offscreen/voice-capture.ts)
+
+- `tts: primary latched to local speech` demoted `warn` → `info`: VoiceLens speaks with local `speechSynthesis` ONLY by design (the synth stub always throws), so latching after 3 primary failures is the expected steady state, not a fault.
+- `toCaptureError` preserves the DOM error name in the denied detail (`microphone permission denied or unavailable (<Name> — grant it in extension Options → Enable microphone)`) so denial vs. missing device is distinguishable without DevTools.
+
+## 2. NON-GOALS / INVARIANTS
+
+- No new action types, no schema changes to `web_search` (still targetless, query ≤400 chars, WebGuard-allowed read-only), no backend `/v1/search` behavior change (stateless; the task-scoped gate lives in the frontend controller).
+- No provider keys, endpoints, or SDK calls enter the frontend (architecture-boundary test stays green).
+- Genuine search flows keep working: search → `lastVerifiedResult` → answer-from-observations or navigate-to-observed-URL (existing `search-flow` tests unchanged and green).
+
+## 3. EXIT CRITERIA (ALL REQUIRED)
+
+1. `npm run typecheck --workspaces` clean (frontend + backend).
+2. `npm test --workspace=frontend`: 58 files / 682 tests green, including 3 new `search-flow` cases — navigational search refused with zero Tavily calls, duplicate (case/punctuation-variant) query refused, third search in one task refused while the first two pass.
+3. `npm test --workspace=backend`: 28 files / 309 tests green (prompt content change breaks nothing).
+4. `npm run build --workspace=frontend` succeeds; `frontend/dist/` contains the `VOICE_DIAG` relay on both ends (offscreen send + ignore, worker persist).
+5. Live proof (manual): "open youtube" navigates with zero searches; "find me pizza" searches once and answers; a repeated identical query is refused with the observation text visible to the next reasoning step; Options voice log records turns without the storage warning.
+
+*End of PRD 6.9 v1.0.*

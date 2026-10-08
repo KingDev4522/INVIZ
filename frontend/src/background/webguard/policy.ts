@@ -40,6 +40,13 @@ export interface GuardContext {
    * it is blocked — the value must never be typed from page/model context.
    */
   sensitiveAuthorized: boolean;
+  /**
+   * Trusted-operator mode (explicit user opt-in, "Power mode" in the popup).
+   * Skips the SAFETY gates below (sensitivity + confirmation) — correctness
+   * BLOCKs (schema, provenance, unknown/stale targets) still apply, and the
+   * verdict reason says power mode so the audit trail stays honest.
+   */
+  powerMode?: boolean;
 }
 
 const CONFIRM_SUBMIT_RE = /submit|place order|buy|pay|purchase|send|delete|remove|upload|confirm/i;
@@ -68,9 +75,11 @@ export function evaluate(
     return { decision: "BLOCK", reason: "provenance: not user-authorized" };
   }
 
-  // 3. Target + generation for target-bearing actions. web_search is
-  // read-only and targetless (like navigation): ALLOW, never confirm.
-  const needsTarget = !["navigate", "go_back", "go_forward", "close_tab", "web_search"].includes(
+  // 3. Target + generation for target-bearing actions. web_search and
+  // browser_search are read-only and targetless (like navigation): ALLOW,
+  // never confirm. browser_search navigates via the default search engine
+  // (PRD 6.10 §6/§8) — still targetless, still guarded by schema + budgets.
+  const needsTarget = !["navigate", "go_back", "go_forward", "close_tab", "web_search", "browser_search"].includes(
     action.action,
   );
   let target: TargetInfo | null = null;
@@ -93,8 +102,11 @@ export function evaluate(
     }
   }
 
+  const power = ctx.powerMode === true;
   // 4. Sensitivity gate: secrets are typed only via the authorized slot-fill.
+  // Power mode: the operator explicitly accepted typing anywhere.
   if (
+    !power &&
     target !== null &&
     target.sensitive &&
     action.action === "type" &&
@@ -107,9 +119,10 @@ export function evaluate(
   }
 
   // 5. Confirmation classification for consequential actions.
-  if (needsConfirmation(action, target)) {
+  // Power mode: no REQUIRE_CONFIRMATION is ever emitted.
+  if (!power && needsConfirmation(action, target)) {
     return { decision: "REQUIRE_CONFIRMATION", reason: "consequential action requires explicit approval" };
   }
 
-  return { decision: "ALLOW", reason: "within policy" };
+  return { decision: "ALLOW", reason: power ? "within policy (power mode: safety gates bypassed)" : "within policy" };
 }

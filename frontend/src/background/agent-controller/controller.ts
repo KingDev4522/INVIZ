@@ -5,13 +5,17 @@
  * Secrets live in instance memory only — never in persisted TaskState.
  */
 import {
+  CONTEXT_MODE_DEFAULT,
   MAX_ACTIONS_PER_TASK,
   MAX_QWEN_CALLS_PER_TASK,
   MAX_RECOVERY_ATTEMPTS_PER_ACTION,
+  MAX_SEARCHES_PER_TASK,
   MAX_TASK_DURATION_MS,
   OPEN_SITE_ALLOWLIST,
   WAITING_FOR_CONFIRMATION_TTL_MS,
   WAITING_FOR_USER_ANSWER_TTL_MS,
+  parseContextMode,
+  type ContextMode,
 } from "../../../../shared/constants.js";
 import { getErrorSpeech } from "../../../../shared/messages.js";
 import { logger } from "../../../../shared/logger.js";
@@ -48,11 +52,12 @@ import {
   buildUserPayload,
   ENDPOINTS,
   type BackendRef,
+  type HybridScreenshot,
   type LayerB,
   type SearchResultItem,
 } from "../../../../shared/api.js";
 import { needsRefresh } from "../../../../shared/refresh-policy.js";
-import { serializePage } from "../../ai/context-budget.js";
+import { estimateImageTokens, serializePage } from "../../ai/context-budget.js";
 import { chunkText } from "../../tts/text-shaping.js";
 import type { Transcript } from "../../ai/transcript.js";
 import {
@@ -67,6 +72,13 @@ import { createBuiltinCatalog, registerBuiltinSkills } from "../../skills/builti
 import { EpisodeRecorder } from "../learning/episode-recorder.js";
 import type { EpisodeStore } from "../../learning/episode-store.js";
 import type { EpisodeRegistryVersion } from "../../../../shared/episode.js";
+import {
+  classifyResultType,
+  domainOf,
+  routeGoalResult,
+  selectSearchStrategies,
+  type SearchStrategy,
+} from "./search-strategy.js";
 
 export interface SnapshotItem {
   id: string;
@@ -91,6 +103,9 @@ export interface PageSnapshotLike {
     openDialogs?: number;
   };
   prose?: Array<{ id: string; label: string; text: string; chars: number }>;
+  /** Storage write time (Date.now). Absent on older snapshots; used only to
+   *  detect a stale CURRENT-page read — never sent to the model. */
+  savedAt?: number;
 }
 
 export interface ControllerDeps {
@@ -115,10 +130,40 @@ export interface ControllerDeps {
     ctx: { tabId: number; pageGeneration: number },
   ) => Promise<ExecutionResult>;
   verifyFn?: (req: VerifyRequest) => Promise<VerificationResult>;
+  /**
+   * Saved user details ("My details" from the Options page). Pre-seeded
+   * into every new task's providedValues so form-fill works without asking.
+   * Ordinary contact fields only (the shared profile allowlist makes secrets
+   * unrepresentable). Optional; absent = previous behavior (empty).
+   * Never throws (empty on failure).
+   */
+  loadProfile?: () => Promise<Record<string, string>>;
   speak?: (text: string, lang: "en" | "hi" | "mixed", priority: AudioPriority) => Promise<void>;
   stopAudio?: (all: boolean) => Promise<void>;
   setAgentActive?: (tabId: number, active: boolean) => Promise<void>;
   loadSnapshot?: (tabId: number) => Promise<PageSnapshotLike | null>;
+  /**
+   * Post-navigation settle: resolves true once an observed snapshot for the
+   * navigated URL exists. stepOnce reads snapshots posted by the content
+   * script, which arrive 1–5 s after a navigation — without this wait the
+   * next reasoning step acts on the PRE-navigation page. Optional; absent =
+   * previous behavior (proceed immediately). Never throws (false on timeout).
+   */
+  waitForSettledSnapshot?: (tabId: number, url: string, timeoutMs: number) => Promise<boolean>;
+  /**
+   * CURRENT-PAGE acquisition (no navigation required).
+   * Live tab URL for staleness comparison (wiring: chrome.tabs.get).
+   * Optional; absent = no URL-match check (previous behavior).
+   * Never throws (null on unknown/closed tab).
+   */
+  getTabUrl?: (tabId: number) => Promise<string | null>;
+  /**
+   * On-demand fresh extraction (wiring: REQUEST_SNAPSHOT → content script).
+   * Forces ContextLens to re-extract the CURRENT page instead of trusting
+   * storage. Optional; absent = storage-only (previous behavior).
+   * Never throws (null when the content script is unreachable).
+   */
+  requestFreshSnapshot?: (tabId: number) => Promise<PageSnapshotLike | null>;
   /**
    * Skill registry + catalog. Optional; defaults to the built-in skills so the
    * skill path works without wiring. Tests can inject a registry to exercise
@@ -134,6 +179,33 @@ export interface ControllerDeps {
   repeatAudio?: () => Promise<void>;
   /** Live lifecycle narration for the on-screen overlay. Optional, never blocking. */
   onProgress?: (event: AgentProgressEvent) => void;
+  /**
+   * Trusted-operator mode (explicit user opt-in via the popup "Power mode"
+   * toggle). Forwards to WebGuard: safety gates (sensitive-field block,
+   * REQUIRE_CONFIRMATION) are bypassed; correctness BLOCKs still apply and
+   * verdicts stay in the audit trail. Absent/false = previous behavior.
+   */
+  powerMode?: boolean;
+  /**
+   * EXPERIMENTAL ContextLens mode (hybrid vision prototype).
+   * Absent or "dom" = the existing DOM/ARIA text-only context path, unchanged.
+   * "hybrid" = additionally capture the viewport screenshot and ship it as
+   * Ollama multimodal input alongside a COMPACT target registry.
+   *
+   * This changes ONLY what the model is shown. The eNN registry stays the sole
+   * source of executable targets, and WebGuard / target existence / generation
+   * freshness / budgets / verification are all untouched by this flag.
+   */
+  contextMode?: ContextMode;
+  /**
+   * EXPERIMENTAL: captures the current tab viewport for a hybrid turn.
+   * Injected (never imported directly) so the controller stays chrome-free and
+   * unit-testable, and so an absent/throwing capture degrades to DOM context.
+   * Only consulted when contextMode === "hybrid".
+   */
+  captureScreenshot?: (tabId: number) => Promise<HybridScreenshot | null>;
+  /** Automatically starts voice capture after the assistant asks a question or confirmation. */
+  startVoiceCapture?: () => Promise<void>;
   store?: {
     load: () => Promise<TaskSnapshot | null>;
     save: (s: TaskSnapshot) => Promise<void>;
@@ -234,6 +306,47 @@ function trimProse(
   return out;
 }
 
+/**
+ * Sparse-AX gate for the P0-1 vision fallback (sparse-trigger only).
+ *
+ * A step is sparse when the AX registry alone is unlikely to ground an
+ * action: almost no targets, or most targets unnamed (icon-only controls the
+ * model cannot distinguish). Either condition triggers — no site-specific
+ * logic, just counts. Thresholds are conservative so ordinary pages
+ * (dozens of named controls) never pay for a capture.
+ */
+export const SPARSE_MAX_ITEMS = 8;
+export const SPARSE_UNNAMED_FRACTION = 0.5;
+
+export interface SparsityAssessment {
+  sparse: boolean;
+  reason: "empty" | "few-items" | "unnamed-fraction" | "dense";
+  itemCount: number;
+  unnamedCount: number;
+  unnamedFraction: number;
+}
+
+export function assessSnapshotSparsity(
+  items: ReadonlyArray<{ name: string }>,
+): SparsityAssessment {
+  const itemCount = items.length;
+  let unnamedCount = 0;
+  for (const item of items) {
+    if (item.name.trim() === "") unnamedCount += 1;
+  }
+  const unnamedFraction = itemCount === 0 ? 1 : unnamedCount / itemCount;
+  if (itemCount === 0) {
+    return { sparse: true, reason: "empty", itemCount, unnamedCount, unnamedFraction };
+  }
+  if (itemCount <= SPARSE_MAX_ITEMS) {
+    return { sparse: true, reason: "few-items", itemCount, unnamedCount, unnamedFraction };
+  }
+  if (unnamedFraction >= SPARSE_UNNAMED_FRACTION) {
+    return { sparse: true, reason: "unnamed-fraction", itemCount, unnamedCount, unnamedFraction };
+  }
+  return { sparse: false, reason: "dense", itemCount, unnamedCount, unnamedFraction };
+}
+
 function isSubmitControl(role: string, name: string): boolean {
   return role === "button" && SUBMIT_NAME_RE.test(name);
 }
@@ -298,7 +411,7 @@ function includesWord(text: string, words: string[]): boolean {
 // directly — no reasoning call, no search, no skill selection. Anything not
 // listed in OPEN_SITE_ALLOWLIST still goes through the model.
 const OPEN_SITE_RE =
-  /^(?:please\s+)?(?:open|go to|goto|launch|visit)\s+(?:www\.)?(youtube|github)(?:\.com)?\s*(?:please)?[?.!\s]*$/i;
+  /^(?:please\s+)?(?:open|go to|goto|launch|visit)\s+(?:www\.)?(youtube|github|twitter|x|google|reddit|wikipedia|[a-z0-9-]+\.[a-z]{2,})(?:\.com)?\s*(?:please)?[?.!\s]*$/i;
 
 /**
  * Returns the allowlisted destination URL for an unambiguous open-site
@@ -309,7 +422,168 @@ export function resolveOpenSiteDestination(goal: string): string | null {
   const match = OPEN_SITE_RE.exec(goal.trim());
   if (match === null) return null;
   const key = (match[1] ?? "").toLowerCase();
-  return OPEN_SITE_ALLOWLIST[key] ?? null;
+  const allowlisted = OPEN_SITE_ALLOWLIST[key];
+  if (allowlisted !== undefined) return allowlisted;
+  if (/^[a-z0-9-]+\.[a-z]{2,}$/i.test(key)) {
+    return `https://${key}/`;
+  }
+  return null;
+}
+
+// Compound-goal prefix ("open YouTube and play lofi", "go to GitHub and show
+// trending", "open Twitter and write a post"). The leading open-site command
+// is deterministic (same allowlist, same trusted pipeline), but the task STAYS
+// ALIVE: after the navigate, the model reasons over the fresh page toward the
+// FULL goal.
+const OPEN_SITE_PREFIX_RE =
+  /^(?:please\s+)?(?:open|go to|goto|launch|visit)\s+(?:www\.)?(youtube|github|twitter|x|google|reddit|wikipedia|[a-z0-9-]+\.[a-z]{2,})(?:\.com)?\b[\s?.!,]+(.+)$/i;
+
+/**
+ * Returns the allowlisted URL plus the remaining goal text when the goal
+ * STARTS with an open-site command followed by more work, or null when the
+ * goal is a bare open-site command (full-match path) or starts elsewhere.
+ * Exported for unit tests; the only caller is stepOnce (first step).
+ */
+export function resolveOpenSitePrefix(goal: string): { url: string; rest: string } | null {
+  const match = OPEN_SITE_PREFIX_RE.exec(goal.trim());
+  if (match === null) return null;
+  const key = (match[1] ?? "").toLowerCase();
+  let url = OPEN_SITE_ALLOWLIST[key];
+  if (url === undefined && /^[a-z0-9-]+\.[a-z]{2,}$/i.test(key)) {
+    url = `https://${key}/`;
+  }
+  if (url === undefined) return null;
+  const rest = (match[2] ?? "").trim();
+  if (rest === "") return null;
+  return { url, rest };
+}
+
+// --- PRD 6.10: search taxonomy -----------------------------------------------
+/**
+ * Search intent taxonomy (PRD 6.10 §4–§5):
+ * - "browser": "Search for Tesla" / "Google Tesla" — Chrome default-engine
+ *   search, works from any already-open page (no Google pre-open needed).
+ * - "page": "Search this page/website for Tesla", "Search YouTube for Baby"
+ *   — use the CURRENT page's own search UI via ContextLens (never Tavily).
+ * - "web_research": "Who is Tesla's CEO?" — fresh external facts genuinely
+ *   needed; the existing gated web_search (Tavily) may apply.
+ * - "navigation": "Open Tesla.com" — deterministic navigation, never search.
+ * - "none": anything else; the model decides (existing behavior preserved).
+ *
+ * The word "search" alone never auto-triggers Tavily (§4): browser/page
+ * intents route to browser/page capabilities, never to web_search.
+ * Exported for unit tests.
+ */
+export type SearchIntent = "browser" | "page" | "web_research" | "navigation" | "none";
+
+/** "search this/this page/current page/here" or "search <site> for/on/in". */
+const PAGE_SEARCH_RE =
+  /\bsearch\b.{0,24}\b(this|current)\s+(page|website|web\s*site|site|tab)\b/i;
+const SITE_SEARCH_RE =
+  /\bsearch\b\s*(?:on|in|within)?\s*(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\b/i;
+const SITE_SEARCH_FOR_RE =
+  /\bsearch\b\s+(youtube|youtu|google|github|twitter|reddit|wikipedia|netflix|amazon|flipkart)\s+for\b/i;
+
+/** Bare browser-search commands: "search [for] X", "google X", "look up X". */
+const BROWSER_SEARCH_RE =
+  /^(?:please\s+)?(?:search(?:\s+for)?|google|look\s*up)\b/i;
+
+/** Genuine information questions (PRD 6.10 §5: "Who is Tesla's CEO?"). */
+const RESEARCH_QUESTION_RE =
+  /^(?:who|what|when|where|why|how|which|whose|whom)\b[^?.!]*[?.!]*$/i;
+
+/**
+ * Classifies a voice goal into the PRD 6.10 search taxonomy. Pure and
+ * deterministic — the model never decides this mapping. Order matters:
+ * page/site first (it also starts with "search"), then browser, then
+ * navigation, then research. Exported for unit tests.
+ */
+export function classifySearchIntent(goal: string): SearchIntent {
+  const text = goal.trim();
+  if (text === "") return "none";
+  // Page/site search wins over browser: "Search YouTube for Baby" and
+  // "Search this website for Tesla" start with "search" but mean the
+  // current page's UI, not the browser engine (§4–§5, §13).
+  if (
+    PAGE_SEARCH_RE.test(text) ||
+    SITE_SEARCH_FOR_RE.test(text) ||
+    SITE_SEARCH_RE.test(text)
+  ) {
+    return "page";
+  }
+  if (BROWSER_SEARCH_RE.test(text)) return "browser";
+  if (NAVIGATIONAL_GOAL_RE.test(text) || OPEN_SITE_RE.test(text)) {
+    return "navigation";
+  }
+  if (RESEARCH_QUESTION_RE.test(text)) return "web_research";
+  return "none";
+}
+
+/**
+ * Extracts the browser-search query from a voice goal (PRD 6.10 §9).
+ * "search for tesla" → "tesla"; "google best laptops under $1000" →
+ * "best laptops under $1000"; "search for baby by justin bieber" →
+ * "baby justin bieber". Strips the command verb, trailing multi-step
+ * continuations ("and open …", "and play …"), and filler "by" phrasing.
+ * Preserves the user's wording — never routes through Tavily for cleanup.
+ * Returns "" when no query remains. Exported for unit tests.
+ */
+export function extractBrowserSearchQuery(goal: string): string {
+  let text = goal.trim().replace(/[?.!\s]+$/u, "");
+  text = text.replace(/^(?:please\s+)/i, "");
+  text = text.replace(/^(?:search\s+for|search|google|look\s*up)\b\s*/i, "");
+  // Multi-step continuation ("Search Tesla and open the official website",
+  // "Search for Baby … and play it"): the search query is the FIRST clause.
+  const continuation = text.search(/\s+and\s+(?:open|play|click|go\s+to|show|select|visit)\b/i);
+  if (continuation !== -1) text = text.slice(0, continuation);
+  // "baby by justin bieber" → "baby justin bieber" (§9 example).
+  text = text.replace(/\s+by\s+/gi, " ");
+  text = text.replace(/\s+/gu, " ").trim();
+  if (text.length > 400) text = text.slice(0, 400).trimEnd();
+  return text;
+}
+
+/**
+ * True when a URL looks like a search-results page (generic: any engine's
+ * ?q=/query=/text=/search= param or a /search path). Used to verify that a
+ * browser search actually landed on results (PRD 6.10 §18) without any
+ * engine-specific selectors (§G6). Exported for unit tests.
+ */
+export function isSearchResultsUrl(url: string): boolean {
+  const lowered = url.toLowerCase();
+  if (/[?&](q|query|text|search|keyword|keywords)=/.test(lowered)) return true;
+  if (/\/search(\/|$|\?|#)/.test(lowered)) return true;
+  return false;
+}
+
+/**
+ * Normalizes a web-search query for duplicate comparison: case-folded,
+ * punctuation-stripped, whitespace-collapsed. Exported for unit tests.
+ */
+export function normalizeSearchQuery(query: string): string {
+  return query
+    .toLowerCase()
+    .replace(/[^a-z0-9\u0900-\u097F\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+const NAVIGATIONAL_GOAL_RE =
+  /^(?:please\s+)?(?:open|go to|goto|launch|visit|take me to|show me)\b/i;
+
+/**
+ * True when a web_search is a navigational request in disguise: the goal
+ * itself is "open/go to X" and the query is just the site name (or names an
+ * allowlisted site). The model must navigate directly instead of spending a
+ * Tavily credit to find a homepage it already knows. Exported for unit tests.
+ */
+export function isNavigationalSearchRefusal(goal: string, query: string): boolean {
+  if (!NAVIGATIONAL_GOAL_RE.test(goal.trim())) return false;
+  const normalized = normalizeSearchQuery(query);
+  if (normalized === "") return false;
+  if (normalized.split(" ").length <= 2) return true;
+  const allowlistKeys = Object.keys(OPEN_SITE_ALLOWLIST);
+  return allowlistKeys.some((key) => normalized.includes(key));
 }
 
 /** Field-name matching across the model/registry spelling gap ("full_name",
@@ -352,6 +626,87 @@ export function approvalSignature(action: StructuredAction): string {
 }
 
 /**
+ * Goal-echo confirmation (Phase 2): natural replies that restate the PENDING
+ * action count as approval — but ONLY when a confirmation is actually pending
+ * (the caller guarantees that scope; this function never approves anything
+ * on its own).
+ *
+ * Why this exists: users answer a submit prompt with "submit" / "do it" /
+ * "yes, submit" — none of which are in the yes/no grammar, so the turn fell
+ * into unclear → re-ask → dropped-confirmation → re-reason loops. "Submit"
+ * said to an empty room still means nothing; said to a pending submit click,
+ * it is unambiguous.
+ *
+ * Conservative by construction: exact short phrases, or a short reply naming
+ * the pending target / using the pending action's verb. Anything longer or
+ * unrelated returns false and the normal grammar decides.
+ */
+const ECHO_APPROVAL_PHRASES: ReadonlySet<string> = new Set([
+  "do it",
+  "do that",
+  "do this",
+  "submit",
+  "submit it",
+  "go ahead",
+  "confirm it",
+  "approve it",
+  "yes submit",
+  "ok submit",
+  "kar do",
+  "kardo",
+]);
+
+const ECHO_VERBS: Readonly<Record<string, ReadonlyArray<string>>> = {
+  click: ["click", "press", "tap", "submit", "select", "choose", "open", "hit", "push"],
+  type: ["type", "enter", "fill", "write"],
+  focus: ["focus"],
+  select: ["select", "choose"],
+  scroll: ["scroll"],
+  press_key: ["press"],
+};
+
+function echoTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[.!…]+$/u, "")
+    .split(/[^a-z0-9\u0900-\u097F']+/u)
+    .filter((t) => t !== "");
+}
+
+export function isEchoApproval(
+  text: string,
+  action: StructuredAction,
+  targetName: string,
+): boolean {
+  const clean = text.trim().toLowerCase().replace(/[.!…]+$/u, "");
+  if (ECHO_APPROVAL_PHRASES.has(clean)) return true;
+  const toks = echoTokens(text);
+  if (toks.length === 0 || toks.length > 6) return false;
+  const nameWords = targetName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((w) => w.length > 2);
+  if (nameWords.some((w) => toks.includes(w))) return true;
+  // Bare action verbs only in SHORT replies ("submit it") — a longer sentence
+  // containing a verb ("submit the quarterly report for review") is not an
+  // unambiguous echo and stays with the normal grammar.
+  if (toks.length > 4) return false;
+  const verbs = ECHO_VERBS[action.action] ?? [];
+  if (verbs.some((v) => toks.includes(v))) return true;
+  return false;
+}
+
+/** Short action-echo utterances with no target context (for the answer-path guard). */
+export function isActionEchoUtterance(text: string): boolean {
+  const clean = text.trim().toLowerCase().replace(/[.!…]+$/u, "");
+  if (ECHO_APPROVAL_PHRASES.has(clean)) return true;
+  const toks = echoTokens(text);
+  if (toks.length === 0 || toks.length > 3) return false;
+  const allVerbs = new Set(Object.values(ECHO_VERBS).flat());
+  return toks.some((t) => allVerbs.has(t));
+}
+
+/**
  * True when this action performs a side effect that must NOT be repeated
  * automatically: clicking a submit/send/pay/delete-style control.
  *
@@ -375,6 +730,22 @@ export class AgentController {
   private secrets = new Map<string, string>(); // taskId:field → value (memory only)
   private readSessions = new Map<number, { chunks: string[]; index: number; lang: "en" | "hi" }>();
   private reasks = new Map<string, number>();
+  /**
+   * Per-task user-cancellation signal (Phase 2 hardening). Created when a task
+   * starts, aborted by cancelTask. Threaded into the reasoning fetch so an
+   * in-flight /v1/chat request rejects promptly on X/stop instead of running
+   * to timeout — and every post-await site checks it (see isStepStale) so a
+   * late AI result can never dispatch, speak, or mutate state after cancel.
+   * Memory-only, per task, cleared on finish/cancel.
+   */
+  private taskAbort = new Map<string, AbortController>();
+  /**
+   * Consecutive ordinary ask_user outcomes with no intervening action. A model
+   * that keeps asking instead of acting gets an explicit continue-directive in
+   * the next intent (loop breaker). High-sensitivity asks are exempt — a
+   * secret genuinely missing must stay a question, never become a guess.
+   */
+  private consecutiveAsk = new Map<string, number>();
   /**
    * taskId -> signatures the user already approved with an explicit "yes".
    *
@@ -453,6 +824,186 @@ export class AgentController {
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
+  }
+
+  /**
+   * Saved-details pre-seed ("My details"). Returns sanitized ordinary
+   * contact values for the new task, or {} when none saved / dep absent /
+   * read fails. Never throws; never returns secrets (shared allowlist).
+   */
+  private async loadSavedProfile(): Promise<Record<string, string>> {
+    if (this.deps.loadProfile === undefined) return {};
+    try {
+      const profile = await this.deps.loadProfile();
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(profile)) {
+        if (typeof value === "string" && value.trim() !== "") {
+          out[key] = value.slice(0, 200);
+        }
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * CURRENT-PAGE acquisition: returns a fresh usable snapshot of the ALREADY
+   * OPEN tab — no navigation required, no "open X first" prerequisite.
+   *
+   * Why this exists: a new voice command starts a new task whose ONLY context
+   * is the current tab. A single storage read can return a pre-render SPA
+   * read (right URL, zero targets) or a pre-route URL — and the model,
+   * forbidden from inventing ids, must then ask instead of acting.
+   *
+   * Generic strategy (all optional deps, all fail-soft to previous behavior):
+   *  1. Storage read. Null → pull fresh once, then brief poll (covers worker
+   *     restart / eviction / content script that never pushed).
+   *  2. Empty-items snapshot → pull fresh + short settle poll for a late
+   *     render push. An empty registry can never satisfy a contextual action;
+   *     waiting briefly is cheaper than burning a reasoning call that must ask.
+   *  3. Stale snapshot (savedAt older than the current-page budget) → pull.
+   *  4. URL-mismatch snapshot vs live tab URL → pull fresh once, re-read
+   *     (user switched tabs during capture, SPA route not yet pushed).
+   * Never throws; returns null only when no snapshot exists at all.
+   */
+  private async ensureCurrentSnapshot(tabId: number, taskId?: string): Promise<PageSnapshotLike | null> {
+    const loadSnapshot = this.deps.loadSnapshot ?? (async () => null);
+    const requestFresh = this.deps.requestFreshSnapshot;
+    const getTabUrl = this.deps.getTabUrl;
+    const turnId = taskId !== undefined ? this.taskTurns.get(taskId) : undefined;
+
+    let snapshot = await loadSnapshot(tabId);
+
+    // 1. No stored snapshot at all: pull once, then poll briefly for the push.
+    if (snapshot === null && requestFresh !== undefined) {
+      try {
+        const fresh = await requestFresh(tabId);
+        if (fresh !== null) return fresh;
+      } catch {
+        // Fall through to the poll below.
+      }
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise((r) => setTimeout(r, 200));
+        snapshot = await loadSnapshot(tabId);
+        if (snapshot !== null) break;
+      }
+      if (snapshot === null) {
+        logger.warn("agent: no current-page snapshot even after pull", {
+          ...(taskId !== undefined ? { taskId } : {}),
+          ...(turnId !== undefined ? { turnId } : {}),
+          tabId,
+        });
+        return null;
+      }
+    } else if (snapshot === null) {
+      // Storage-only path (tests / old wiring): keep the historic short poll
+      // for post-action steps so behavior is unchanged.
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await new Promise((r) => setTimeout(r, 200));
+        snapshot = await loadSnapshot(tabId);
+        if (snapshot !== null) break;
+      }
+      if (snapshot === null) return null;
+    }
+
+    // At this point snapshot is non-null (TypeScript narrowing via local).
+    let current = snapshot as PageSnapshotLike;
+
+    // 2. Empty registry: possibly a pre-render SPA read. Pull once, then
+    // settle-poll briefly for a late render push (route follow-ups land
+    // ~1-3s after the route). Bounded: at most ~2s extra on empty pages.
+    if (current.items.length === 0) {
+      if (requestFresh !== undefined) {
+        try {
+          const fresh = await requestFresh(tabId);
+          if (fresh !== null && fresh.items.length > 0) {
+            logger.info("agent: empty snapshot refreshed via pull", {
+              ...(taskId !== undefined ? { taskId } : {}),
+              ...(turnId !== undefined ? { turnId } : {}),
+              url: fresh.url,
+              items: fresh.items.length,
+            });
+            return fresh;
+          }
+          if (fresh !== null) current = fresh;
+        } catch {
+          // Keep the stored snapshot; reasoning over an empty page is still
+          // more honest than failing when the tab is genuinely empty.
+        }
+      }
+      // Settle poll only when a live update path exists (pull dep present):
+      // storage-only callers (unit tests) never change between polls, so
+      // polling would only burn the turn budget.
+      if (current.items.length === 0 && requestFresh !== undefined) {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          await new Promise((r) => setTimeout(r, 200));
+          const polled = await loadSnapshot(tabId);
+          if (polled !== null && polled.items.length > 0) {
+            logger.info("agent: empty snapshot settled via storage poll", {
+              ...(taskId !== undefined ? { taskId } : {}),
+              ...(turnId !== undefined ? { turnId } : {}),
+              url: polled.url,
+              items: polled.items.length,
+            });
+            current = polled;
+            break;
+          }
+        }
+      }
+    }
+
+    // 3. Stale snapshot by age: storage survived but the page kept living
+    // (media state flips, SPA re-renders) without a push. Generic budget:
+    // older than 60s is re-pulled once when a pull path exists.
+    if (requestFresh !== undefined && typeof current.savedAt === "number") {
+      const ageMs = this.now() - current.savedAt;
+      if (ageMs > 60_000) {
+        try {
+          const fresh = await requestFresh(tabId);
+          if (fresh !== null) {
+            logger.info("agent: stale snapshot refreshed via pull", {
+              ...(taskId !== undefined ? { taskId } : {}),
+              ...(turnId !== undefined ? { turnId } : {}),
+              ageMs,
+              url: fresh.url,
+              items: fresh.items.length,
+            });
+            return fresh;
+          }
+        } catch {
+          // Keep the stored snapshot on pull failure.
+        }
+      }
+    }
+
+    // 4. URL mismatch: stored snapshot belongs to another page / pre-route.
+    if (getTabUrl !== undefined) {
+      let liveUrl: string | null = null;
+      try {
+        liveUrl = await getTabUrl(tabId);
+      } catch {
+        liveUrl = null;
+      }
+      if (liveUrl !== null && liveUrl !== "" && liveUrl !== current.url && requestFresh !== undefined) {
+        logger.info("agent: snapshot URL mismatch; pulling fresh", {
+          ...(taskId !== undefined ? { taskId } : {}),
+          ...(turnId !== undefined ? { turnId } : {}),
+          storedUrl: current.url,
+          liveUrl,
+        });
+        try {
+          const fresh = await requestFresh(tabId);
+          if (fresh !== null) return fresh;
+        } catch {
+          // Fall through with the stored snapshot.
+        }
+        const reloaded = await loadSnapshot(tabId);
+        if (reloaded !== null) current = reloaded;
+      }
+    }
+
+    return current;
   }
 
   /**
@@ -550,12 +1101,21 @@ export class AgentController {
       pendingQuestion: null,
       pendingConfirmation: null,
       lastVerifiedResult: null,
-      providedValues: {},
+      // "My details" pre-seed: saved ordinary contact info flows into the
+      // existing slot-fill path (prompt grounding + deterministic type), so
+      // "fill in my details" works without asking. Secrets stay memory-only.
+      providedValues: await this.loadSavedProfile(),
+      searchCount: 0,
+      searchedQueries: [],
     };
     await store.save(snapshot);
     if (transcript.turnId !== undefined) {
       this.taskTurns.set(snapshot.taskId, transcript.turnId);
     }
+    // Fresh cancellation signal per task (Phase 2 hardening): X/stop aborts
+    // this controller, which rejects the in-flight reasoning fetch and marks
+    // every post-await site stale (see isStepStale).
+    this.taskAbort.set(snapshot.taskId, new AbortController());
     this.recorder.begin(snapshot); // no-op unless recording was opted into
     this.emitProgress({ taskId: snapshot.taskId, kind: "started" });
     await this.run(snapshot.taskId, tabId, store);
@@ -614,29 +1174,18 @@ export class AgentController {
       return;
     }
 
-    const loadSnapshot = this.deps.loadSnapshot ?? (async () => null);
-    const snapshot = await loadSnapshot(tabId);
-    if (snapshot === null) {
-      // No snapshot: check if we at least know the tab URL pattern for unsupported pages.
-      // Generic fallback — caller will map to CANNOT_ACCESS_PAGE; chrome:// gets UNSUPPORTED_PAGE via url-aware path below.
-      await this.finish(task, "FAILED", "CANNOT_ACCESS_PAGE", tabId, store);
-      return;
-    }
-    // Unsupported scheme (chrome://, chrome-extension://, about:, edge://, view-source:, file:) — snapshot may be empty or stale.
-    if (/^(chrome|chrome-extension|about|edge|view-source|file):/i.test(snapshot.url)) {
-      await this.finish(task, "FAILED", "UNSUPPORTED_PAGE", tabId, store);
-      return;
-    }
-
     // Deterministic open-site navigation (first step of a fresh task only).
-    // The model may not invent URLs, so "open YouTube" from an arbitrary page
-    // could never become a direct navigate — it degraded into web_search
-    // followed by "which URL?". Resolve the frozen allowlist here instead:
-    // same trusted pipeline (WebGuard → executor → verification), zero
-    // reasoning calls, no search, no skill hijack.
+    // Safe to run even on restricted surfaces (chrome://, about:blank, or un-injected tabs)
+    // because navigation uses chrome.tabs.update which needs NO prior page snapshot.
     if (task.currentStep === 0 && task.lastVerifiedResult === null) {
       const destination = resolveOpenSiteDestination(task.goal);
       if (destination !== null) {
+        const dummySnapshot: PageSnapshotLike = {
+          url: "about:blank",
+          title: "",
+          generation: 0,
+          items: [],
+        };
         await this.doAction(
           {
             action: "navigate",
@@ -644,13 +1193,79 @@ export class AgentController {
             expect: { type: "navigation_completed" },
           },
           task,
-          snapshot,
+          dummySnapshot,
           tabId,
           store,
           { sensitiveAuthorized: false, confirmed: false },
         );
         return;
       }
+      // Compound goal ("open YouTube and play lofi", "open Twitter and write a post"):
+      // deterministic first navigation, then the run loop continues over the fresh page.
+      const prefixed = resolveOpenSitePrefix(task.goal);
+      if (prefixed !== null) {
+        const dummySnapshot: PageSnapshotLike = {
+          url: "about:blank",
+          title: "",
+          generation: 0,
+          items: [],
+        };
+        await this.doAction(
+          {
+            action: "navigate",
+            parameters: { url: prefixed.url },
+            expect: { type: "navigation_completed" },
+          },
+          task,
+          dummySnapshot,
+          tabId,
+          store,
+            { sensitiveAuthorized: false, confirmed: false },
+        );
+        return;
+      }
+      // PRD 6.10 deterministic browser search (first step of a fresh task).
+      // "Search for Tesla" performs a browser-level search from the
+      // ALREADY-OPEN page — no prior Google navigation required (A5). Like
+      // open-site navigation it runs before snapshot acquisition: the search
+      // executes in the tab via chrome.search/tabs.update, and the loop then
+      // re-observes the fresh results page. Compound goals ("Search Tesla
+      // and open the official website") search first; the model grounds the
+      // follow-up navigation from the fresh results observation.
+      if (classifySearchIntent(task.goal) === "browser") {
+        const query = extractBrowserSearchQuery(task.goal);
+        if (query !== "") {
+          const dummySnapshot: PageSnapshotLike = {
+            url: "about:blank",
+            title: "",
+            generation: 0,
+            items: [],
+          };
+          await this.doBrowserSearch(
+            { action: "browser_search", parameters: { query } },
+            task,
+            dummySnapshot,
+            tabId,
+            store,
+          );
+          return;
+        }
+      }
+    }
+
+    // CURRENT-PAGE acquisition: the already-open tab IS the context. Never
+    // require a prior navigate / "open X" — pull fresh when storage is
+    // missing, empty (SPA pre-render), or URL-mismatched (tab switched).
+    const snapshot = await this.ensureCurrentSnapshot(tabId, task.taskId);
+    if (snapshot === null) {
+      // No snapshot even after pull: content script unreachable on this tab.
+      await this.finish(task, "FAILED", "CANNOT_ACCESS_PAGE", tabId, store);
+      return;
+    }
+    // Unsupported scheme (chrome://, chrome-extension://, about:, edge://, view-source:, file:)
+    if (/^(chrome|chrome-extension|about|edge|view-source|file):/i.test(snapshot.url)) {
+      await this.finish(task, "FAILED", "UNSUPPORTED_PAGE", tabId, store);
+      return;
     }
 
     // Enrichment when Layer B is missing/stale (async page prep, PRD 6.4 §1.4).
@@ -707,6 +1322,28 @@ export class AgentController {
       }
     }
 
+    // --- P0-1 sparse vision fallback (CONTEXT_MODE=hybrid; default OFF) ----
+    // AX-first, always: the full AX text below is the reasoning context on
+    // every step. On SPARSE steps only (few targets or mostly unnamed
+    // controls), the viewport screenshot is ATTACHED alongside it — never a
+    // registry swap. The image carries layout only; eNN ids stay the sole
+    // executable targets (WebGuard/registry untouched).
+    //
+    // Local-only: the backend forwards images to the local provider and drops
+    // them on cloud fallback, so attaching here can never leak pixels to a
+    // hosted provider. Every capture failure degrades to text-only.
+    const sparsity = assessSnapshotSparsity(snapshot.items);
+    const sparseTurnId = this.taskTurns.get(task.taskId);
+    logger.info("agent: vision fallback check", {
+      taskId: task.taskId,
+      ...(sparseTurnId !== undefined ? { turnId: sparseTurnId } : {}),
+      itemCount: sparsity.itemCount,
+      unnamedCount: sparsity.unnamedCount,
+      unnamedFraction: Number(sparsity.unnamedFraction.toFixed(3)),
+      sparse: sparsity.sparse,
+      reason: sparsity.reason,
+    });
+    // Full AX text on every step (byte-identical to the pre-fallback path).
     const packed = serializePage({
       url: snapshot.url,
       title: snapshot.title,
@@ -721,6 +1358,48 @@ export class AgentController {
       // budget and produced a constant stream of "too many requests".
       prose: needsPageProse(task) ? trimProse(snapshot.prose ?? []) : [],
     });
+    const pageText = packed.text;
+    const textTokens = packed.estimatedTokens;
+    let hybridImage: HybridScreenshot | undefined;
+    if (
+      sparsity.sparse &&
+      this.deps.contextMode === "hybrid" &&
+      this.deps.captureScreenshot !== undefined
+    ) {
+      try {
+        const captured = await this.deps.captureScreenshot(tabId);
+        if (captured !== null) {
+          hybridImage = captured;
+          // Coarse comparator only (see estimateImageTokens): image cost next
+          // to text cost in one record. Never a provider measurement.
+          const estimatedImageTokens = estimateImageTokens(captured.width, captured.height);
+          logger.info("agent: vision fallback attached", {
+            taskId: task.taskId,
+            ...(sparseTurnId !== undefined ? { turnId: sparseTurnId } : {}),
+            reason: sparsity.reason,
+            itemCount: sparsity.itemCount,
+            textTokens,
+            estimatedImageTokens,
+            imageBytes: captured.bytes,
+            imageWidth: captured.width,
+            imageHeight: captured.height,
+          });
+        } else {
+          logger.info("agent: vision fallback text-only (capture null)", {
+            taskId: task.taskId,
+            ...(sparseTurnId !== undefined ? { turnId: sparseTurnId } : {}),
+            reason: sparsity.reason,
+            textTokens,
+          });
+        }
+      } catch (err) {
+        logger.warn("agent: vision fallback text-only (capture failed)", {
+          taskId: task.taskId,
+          reason: err instanceof Error ? err.message : "unknown",
+          textTokens,
+        });
+      }
+    }
     const provided = Object.entries(task.providedValues)
       .map(([k, v]) => `${k}: ${v}`)
       .join("; ");
@@ -728,6 +1407,33 @@ export class AgentController {
     // re-deriving its low-level steps. Empty when no skill is executable, in
     // which case the section is omitted entirely.
     const skillText = describeAvailableSkills(this.skills().registry);
+    // Captured BEFORE the reasoning await: any X/stop/supersede during the
+    // await bumps runCounter or aborts this task's signal, and the late
+    // result is then discarded instead of dispatched (see isStepStale).
+    const runIdAtStep = this.runCounter;
+    const abortSignal = this.taskAbort.get(task.taskId)?.signal;
+    // Phase 2 continuation: after a verified action the model must keep
+    // working the SAME goal, not re-ask what to do. Generic wording (never a
+    // hardcoded example): remaining work is implied by goal minus completed.
+    const continuationSuffix =
+      task.currentStep === 0
+        ? ""
+        : " The previous action completed and was verified." +
+          " Continue with the next step toward the goal." +
+          " Do not ask the user what to do next unless a required secret" +
+          " (password, OTP, card number) is genuinely missing.";
+    // Loop breaker: consecutive ordinary ask_user outcomes with no intervening
+    // action mean the model is stalling. Say so explicitly on every following
+    // intent until an action breaks the chain (the counter resets on action,
+    // terminal outcomes, finish and cancel).
+    // (consecutiveAsk can only be non-zero after an ask already happened, so
+    // no step counter is needed; currentStep stays 0 until an action verifies.)
+    const askStallSuffix =
+      (this.consecutiveAsk.get(task.taskId) ?? 0) > 0
+        ? " You already asked the user and received no new information." +
+          " Act on the page now: emit the single best click/type/focus action" +
+          " for the goal, or task_complete/cannot_complete. Do not emit ask_user again."
+        : "";
     task.qwenCalls += 1;
     let outcome;
     const reason = this.deps.reason ?? reasonOnce;
@@ -744,20 +1450,35 @@ export class AgentController {
           intent:
             task.currentStep === 0
               ? `User goal: ${task.goal}${provided !== "" ? `\nUser already provided: ${provided}` : ""}` +
-                (task.lastVerifiedResult !== null ? ` Last verified: ${task.lastVerifiedResult}.` : "")
+                (task.lastVerifiedResult !== null ? ` Last verified: ${task.lastVerifiedResult}.` : "") +
+                // Ask-stall loop breaker (Phase 2): an ask-loop never verifies
+                // an action, so currentStep stays 0 — the directive must live
+                // in BOTH branches, not just the continuing one.
+                askStallSuffix
               : `Continuing goal "${task.goal}". Completed ${task.completedActions} action(s).` +
                 (task.lastVerifiedResult !== null ? ` Last verified: ${task.lastVerifiedResult}.` : "") +
                 (provided !== "" ? ` User provided: ${provided}.` : "") +
+                continuationSuffix +
+                askStallSuffix +
                 ` Determine ONLY the next action.`,
           lang: task.goalLang,
-          pageText: packed.text,
+          pageText,
           ...(skillText !== "" ? { skills: skillText } : {}),
         }),
+        ...(hybridImage !== undefined ? { image: hybridImage } : {}),
+        ...(abortSignal !== undefined ? { signal: abortSignal } : {}),
       });
     } catch (err) {
+      // Cancelled mid-reasoning: the abort rejects the fetch. Discard silently
+      // — failReasoning would speak a failure message for a turn the user
+      // explicitly stopped.
+      if (this.isStepStale(task, runIdAtStep)) return;
       await this.failReasoning(task, tabId, store, err);
       return;
     }
+    // Late AI result: cancelled/superseded while reasoning. Discard completely
+    // — no dispatch (no execution), no narration, no state change.
+    if (this.isStepStale(task, runIdAtStep)) return;
 
     this.emitProgress({ taskId: task.taskId, kind: "step", qwenCalls: task.qwenCalls });
     await this.dispatchOutcome(outcome, task, snapshot, tabId, store);
@@ -874,6 +1595,75 @@ export class AgentController {
       await this.afterFailure(task, snapshot, tabId, store, speak);
       return;
     }
+    // Deterministic search-need gate (Tavily costs 1 credit/search): the
+    // prompt already orders page-first → navigate-direct → single search, and
+    // this enforces it so a vigorous model cannot spend the budget on
+    // navigational, duplicate, or unbounded searches. Refusals never call
+    // Tavily; the next reasoning step sees the refusal as its observation.
+    const normalizedQuery = normalizeSearchQuery(query);
+    const searchedQueries = task.searchedQueries ?? [];
+    const searchesSpent = task.searchCount ?? 0;
+    const turnForRefusal = this.taskTurns.get(task.taskId);
+    // PRD 6.10 §4/§14 web-research guard: the word "search" alone must never
+    // trigger Tavily. Browser-search and page-search goals use the browser /
+    // current-page capabilities — web_search (Tavily) is refused so acceptance
+    // tests observe Tavily = 0 (A1/A3/A5/A7). The refusal text steers the next
+    // reasoning step toward the correct capability.
+    const goalIntent = classifySearchIntent(task.goal);
+    if (goalIntent === "browser" || goalIntent === "page") {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult =
+        goalIntent === "browser"
+          ? "web search refused: browser-search request — use the browser_search action (browser-level search) instead of web_search"
+          : "web search refused: page-search request — use the current page's search UI (type into its search control) instead of web_search";
+      await store.save(task);
+      logger.warn("agent: web search refused (search intent is not web research)", {
+        taskId: task.taskId,
+        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
+        intent: goalIntent,
+        query: query.slice(0, 120),
+      });
+      return;
+    }
+    if (isNavigationalSearchRefusal(task.goal, query)) {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult =
+        "web search refused: navigational request — navigate directly to the site instead of searching";
+      await store.save(task);
+      logger.warn("agent: web search refused (navigational)", {
+        taskId: task.taskId,
+        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
+        query: query.slice(0, 120),
+      });
+      return;
+    }
+    if (searchedQueries.includes(normalizedQuery)) {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult = `web search refused: "${query}" was already searched — answer from the earlier observations or navigate to one of their URLs`;
+      await store.save(task);
+      logger.warn("agent: web search refused (duplicate)", {
+        taskId: task.taskId,
+        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
+        query: query.slice(0, 120),
+      });
+      return;
+    }
+    if (searchesSpent >= MAX_SEARCHES_PER_TASK) {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult =
+        "web search refused: search budget spent — answer from the earlier observations or navigate to one of their URLs";
+      await store.save(task);
+      logger.warn("agent: web search refused (budget spent)", {
+        taskId: task.taskId,
+        ...(turnForRefusal !== undefined ? { turnId: turnForRefusal } : {}),
+        query: query.slice(0, 120),
+      });
+      return;
+    }
+    // Spend one budget unit: recorded in memory now, persisted by the saves
+    // below on every path that reached Tavily (results, empty, or error).
+    task.searchCount = searchesSpent + 1;
+    task.searchedQueries = [...searchedQueries, normalizedQuery];
     const speak = this.deps.speak ?? (async () => undefined);
     const turnId = this.taskTurns.get(task.taskId);
     this.emitProgress({ taskId: task.taskId, kind: "searching" });
@@ -899,7 +1689,36 @@ export class AgentController {
           r.snippet.length > 120 ? `${r.snippet.slice(0, 120).trimEnd()}…` : r.snippet;
         return `${i + 1}) ${r.title} — ${r.url}${snippet !== "" ? `: ${snippet}` : ""}`;
       });
-      task.lastVerifiedResult = `web search for "${query}": ${lines.join(" | ")}`;
+      // Result-Type Routing (additive): classify each Tavily hit from its
+      // observed title/url/snippet (multi-signal, never URL-only) and steer
+      // the next step with a goal-specific directive. A found URL is
+      // intermediate evidence, not completion — unless the goal was only
+      // research to be answered from these observations.
+      const resultTypes = results.map((r) =>
+        classifyResultType({
+          title: r.title,
+          url: r.url,
+          domain: domainOf(r.url),
+          surroundingText: r.snippet,
+        }),
+      );
+      const webStrategies = selectSearchStrategies(task.goal, "web_research");
+      task.searchStrategies = webStrategies;
+      const webRouting = routeGoalResult(task.goal);
+      task.pendingResultRouting =
+        webRouting.continuation === "search_complete" ||
+        // Research answered-from-observations is a legitimate completion:
+        // answering from these results consumes the routing.
+        webRouting.continuation === "read_and_answer"
+          ? null
+          : {
+              continuation: webRouting.continuation,
+              query,
+              strategies: webStrategies,
+            };
+      task.lastVerifiedResult =
+        `web search for "${query}": ${lines.join(" | ")} ` +
+        `[result types: ${resultTypes.join(", ")}]. ${webRouting.directive}`;
       await store.save(task);
       const spoken = results
         .slice(0, 3)
@@ -929,6 +1748,75 @@ export class AgentController {
     }
   }
 
+  /**
+   * Executes a browser_search: browser-level search via the Chrome default
+   * engine in the CURRENT tab (PRD 6.10 §6/§8). Runs through the SAME trusted
+   * path as every other action — WebGuard → executor → verification →
+   * fresh-observation settle — so stale-target protection (§17) and
+   * search-results verification (§18) apply unchanged. The next reasoning step
+   * then grounds result selection (title/domain/snippet/ordinal, §12) from
+   * the FRESH results snapshot, never from pre-search targets.
+   *
+   * Privacy-safe telemetry only (intent, mode, truncated query); never page
+   * contents or secrets (§24). Telemetry never steers the action path.
+   */
+  private async doBrowserSearch(
+    action: StructuredAction,
+    task: TaskSnapshot,
+    snapshot: PageSnapshotLike,
+    tabId: number,
+    store: NonNullable<ControllerDeps["store"]>,
+  ): Promise<void> {
+    const params = (action.parameters ?? {}) as Record<string, unknown>;
+    const rawQuery = typeof params["query"] === "string" ? params["query"] : "";
+    const query = rawQuery.trim();
+    const turnId = this.taskTurns.get(task.taskId);
+    if (query === "") {
+      task.recoveryAttempts += 1;
+      task.lastVerifiedResult =
+        "browser search refused: empty query — re-observe the page before retrying";
+      await store.save(task);
+      logger.warn("agent: browser search refused (empty query)", {
+        taskId: task.taskId,
+        ...(turnId !== undefined ? { turnId } : {}),
+      });
+      const speak = this.deps.speak ?? (async () => undefined);
+      await this.afterFailure(task, snapshot, tabId, store, speak);
+      return;
+    }
+    task.searchMode = "browser";
+    // Search Strategy (additive): WHAT to look for, selected from intent +
+    // goal context. Execution still uses the browser-search path unchanged.
+    const strategies: SearchStrategy[] = selectSearchStrategies(
+      task.goal,
+      classifySearchIntent(task.goal),
+    );
+    task.searchStrategies = strategies;
+    logger.info("agent: browser search", {
+      taskId: task.taskId,
+      ...(turnId !== undefined ? { turnId } : {}),
+      intent: "browser",
+      searchMode: "browser",
+      strategies,
+      query: query.slice(0, 120),
+      preSearchUrl: snapshot.url.slice(0, 200),
+      tabId,
+    });
+    this.emitProgress({ taskId: task.taskId, kind: "searching" });
+    await this.doAction(
+      {
+        action: "browser_search",
+        parameters: { query },
+        expect: { type: "navigation_completed" },
+      },
+      task,
+      snapshot,
+      tabId,
+      store,
+      { sensitiveAuthorized: false, confirmed: false },
+    );
+  }
+
   // -- Outcome dispatch ----------------------------------------------------------
 
   private async dispatchOutcome(
@@ -946,12 +1834,14 @@ export class AgentController {
         await this.finish(task, "COMPLETE", null, tabId, store);
         return;
       case "task_complete":
+        this.consecutiveAsk.delete(task.taskId);
         if (outcome.text !== undefined && outcome.text !== "") {
           await speak(outcome.text, task.goalLang, 4);
         }
         await this.finish(task, "COMPLETE", null, tabId, store);
         return;
       case "cannot_complete":
+        this.consecutiveAsk.delete(task.taskId);
         await speak(outcome.reason ?? getErrorSpeech("ACTION_FAILED", langOf(task)), task.goalLang, 3);
         await this.finish(task, "FAILED", null, tabId, store);
         return;
@@ -959,6 +1849,15 @@ export class AgentController {
         if (outcome.question === undefined) {
           await this.finish(task, "FAILED", "AI_SERVICE_UNAVAILABLE", tabId, store);
           return;
+        }
+        // Loop accounting (Phase 2): an ordinary ask with no intervening
+        // action arms the continue-directive on the NEXT intent. A secret
+        // genuinely missing stays a question — high-sensitivity asks never
+        // count, so this can never pressure the model into guessing a secret.
+        if ((outcome.sensitivity ?? "ordinary") === "high") {
+          this.consecutiveAsk.delete(task.taskId);
+        } else {
+          this.consecutiveAsk.set(task.taskId, (this.consecutiveAsk.get(task.taskId) ?? 0) + 1);
         }
         task.status = "WAITING_FOR_USER_ANSWER";
         task.pendingQuestion = {
@@ -974,6 +1873,9 @@ export class AgentController {
           prompt: outcome.question,
         });
         await speak(outcome.question, task.goalLang, 2);
+        if (this.deps.startVoiceCapture !== undefined) {
+          void this.deps.startVoiceCapture().catch(() => undefined);
+        }
         return;
       }
       case "confirmation_required": {
@@ -1025,6 +1927,9 @@ export class AgentController {
           prompt: confirmSpeechText,
         });
         await speak(confirmSpeechText, task.goalLang, 1);
+        if (this.deps.startVoiceCapture !== undefined) {
+          void this.deps.startVoiceCapture().catch(() => undefined);
+        }
         return;
       }
       case "action": {
@@ -1032,12 +1937,18 @@ export class AgentController {
           await this.finish(task, "FAILED", "AI_SERVICE_UNAVAILABLE", tabId, store);
           return;
         }
+        // Progress: an action breaks any ask-stall chain.
+        this.consecutiveAsk.delete(task.taskId);
         if (outcome.action.action === "read") {
           await this.doRead(outcome.action, task, snapshot, tabId, store);
           return;
         }
         if (outcome.action.action === "web_search") {
           await this.doWebSearch(outcome.action, task, snapshot, tabId, store);
+          return;
+        }
+        if (outcome.action.action === "browser_search") {
+          await this.doBrowserSearch(outcome.action, task, snapshot, tabId, store);
           return;
         }
         await this.doAction(outcome.action, task, snapshot, tabId, store, {
@@ -1143,8 +2054,7 @@ export class AgentController {
       return;
     }
 
-    const loadSnapshot = this.deps.loadSnapshot ?? (async () => null);
-    const snapshot = await loadSnapshot(tabId);
+    const snapshot = await this.ensureCurrentSnapshot(tabId, task.taskId);
     if (snapshot === null) {
       this.clearActiveSkill(task.taskId);
       await this.finish(task, "FAILED", "CANNOT_ACCESS_PAGE", tabId, store);
@@ -1273,6 +2183,18 @@ export class AgentController {
     return this.approvals.get(taskId)?.has(approvalSignature(action)) === true;
   }
 
+  /**
+   * Late-result guard (Phase 2 hardening). A reasoning await that resolves
+   * after X/stop/supersede must be discarded COMPLETELY — no dispatch, no
+   * execution, no narration, no state change. Either signal fires: the global
+   * run counter moved (cancel/supersede bumps it), or this task's own abort
+   * was triggered.
+   */
+  private isStepStale(task: TaskSnapshot, runIdAtStep: number): boolean {
+    if (runIdAtStep !== this.runCounter) return true;
+    return this.taskAbort.get(task.taskId)?.signal.aborted === true;
+  }
+
   private targetsOf(snapshot: PageSnapshotLike): Map<string, TargetInfo> {
     const map = new Map<string, TargetInfo>();
     for (const item of snapshot.items) {
@@ -1344,6 +2266,7 @@ export class AgentController {
     task: TaskSnapshot,
     tabId: number,
     pageGeneration: number,
+    grounding?: { node?: { role: string; name: string }; url?: string },
   ): Promise<ExecutionResult> {
     const policy = this.deps.executionPolicy ?? DEFAULT_EXECUTION_POLICY;
     const decision = chooseExecutionMode(policy, { taskId: task.taskId });
@@ -1354,6 +2277,8 @@ export class AgentController {
         tabId,
         pageGeneration,
         taskId: task.taskId,
+        ...(grounding?.node !== undefined ? { node: grounding.node } : {}),
+        ...(grounding?.url !== undefined ? { url: grounding.url } : {}),
       });
       if (result.status === "executed") {
         this.executionModes.set(task.taskId, "external");
@@ -1443,6 +2368,132 @@ export class AgentController {
     return { ok: true };
   }
 
+  /**
+   * Post-navigation settle (compound-task fix). After a verified navigate
+   * (or a STALE_STATE that implies one), the content script needs 1–5 s to
+   * post the new page's snapshot — reasoning immediately would act on stale
+   * refs from the pre-navigation page. Waits (bounded, 10 s) for an observed
+   * snapshot of the target URL; on timeout appends a caution to the verified
+   * result so the next reasoning step re-observes instead of clicking stale
+   * refs. Fail-open: never wedges the loop, never spends recovery budget.
+   *
+   * PRD 6.10 §10/§17: browser_search settles the same way. The destination
+   * URL is engine-dependent (chrome.search uses the default engine), so the
+   * settle waits for ANY URL change from the pre-search page plus a fresh
+   * snapshot pull — never for pre-search targets. The next action after a
+   * browser search must use a fresh page observation.
+   */
+  private async settleAfterNavigation(
+    task: TaskSnapshot,
+    tabId: number,
+    action: StructuredAction,
+  ): Promise<void> {
+    if (action.action === "browser_search") {
+      await this.settleAfterBrowserSearch(task, tabId, action);
+      return;
+    }
+    if (action.action !== "navigate") return;
+    const params = action.parameters as { url?: unknown } | undefined;
+    const targetUrl = typeof params?.url === "string" ? params.url : "";
+    if (targetUrl === "" || this.deps.waitForSettledSnapshot === undefined) return;
+    let settled = false;
+    try {
+      settled = await this.deps.waitForSettledSnapshot(tabId, targetUrl, 10_000);
+    } catch {
+      settled = false;
+    }
+    if (!settled) {
+      task.lastVerifiedResult += " (new page snapshot not yet observed — re-observe before acting)";
+      logger.warn("agent: post-navigation snapshot not observed; proceeding cautiously", {
+        taskId: task.taskId,
+        actionType: action.action,
+      });
+    }
+  }
+
+  /**
+   * Fresh-observation settle for browser_search (PRD 6.10 §10):
+   * 1. detect navigation/page-state change (live URL vs pre-search URL),
+   * 2. wait for the page to become observable (bounded poll),
+   * 3. pull a fresh ContextLens snapshot when a pull path exists,
+   * 4. the next reasoning step reasons only from the fresh observation —
+   *    enforced by the caution appended on timeout plus WebGuard's
+   *    generation check (stale pre-search targets BLOCK).
+   * Fail-open: never wedges the loop, never spends recovery budget.
+   */
+  private async settleAfterBrowserSearch(
+    task: TaskSnapshot,
+    tabId: number,
+    action: StructuredAction,
+  ): Promise<void> {
+    const params = action.parameters as { query?: unknown } | undefined;
+    const query = typeof params?.query === "string" ? params.query : "";
+    // No live-URL path (unit tests / storage-only callers): pull fresh once
+    // when possible, then proceed cautiously — never a 10 s blind wait.
+    if (this.deps.getTabUrl === undefined) {
+      if (this.deps.requestFreshSnapshot !== undefined) {
+        try {
+          await this.deps.requestFreshSnapshot(tabId);
+        } catch {
+          // Fail-soft: the next step's ensureCurrentSnapshot still re-pulls.
+        }
+      }
+      task.lastVerifiedResult += " (fresh search-results observation required before selecting a result)";
+      logger.info("agent: browser search settled", {
+        taskId: task.taskId,
+        query: query.slice(0, 120),
+        landed: true,
+      });
+      return;
+    }
+    const preSearchUrl = await this.safeTabUrl(tabId);
+    // Bounded wait for the search navigation to land: the live URL should
+    // differ from the pre-search URL (or already look like results).
+    const deadline = Date.now() + 10_000;
+    let landed = false;
+    for (;;) {
+      const live = await this.safeTabUrl(tabId);
+      if (
+        live !== null &&
+        live !== "" &&
+        (preSearchUrl === null || live !== preSearchUrl || isSearchResultsUrl(live))
+      ) {
+        landed = true;
+        break;
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    // Pull a fresh snapshot so storage does not serve the pre-search page.
+    if (this.deps.requestFreshSnapshot !== undefined) {
+      try {
+        await this.deps.requestFreshSnapshot(tabId);
+      } catch {
+        // Fail-soft: the next step's ensureCurrentSnapshot still re-pulls.
+      }
+    }
+    if (!landed) {
+      task.lastVerifiedResult += " (search results snapshot not yet observed — re-observe before acting)";
+    } else {
+      task.lastVerifiedResult += " (fresh search-results observation required before selecting a result)";
+    }
+    logger.info("agent: browser search settled", {
+      taskId: task.taskId,
+      query: query.slice(0, 120),
+      landed,
+    });
+  }
+
+  /** Best-effort live tab URL; null when the lookup path is absent/fails. */
+  private async safeTabUrl(tabId: number): Promise<string | null> {
+    if (this.deps.getTabUrl === undefined) return null;
+    try {
+      return await this.deps.getTabUrl(tabId);
+    } catch {
+      return null;
+    }
+  }
+
   private async doAction(
     action: StructuredAction,
     task: TaskSnapshot,
@@ -1461,6 +2512,7 @@ export class AgentController {
       targets,
       provenance: "USER",
       sensitiveAuthorized: opts.sensitiveAuthorized,
+      ...(this.deps.powerMode === true ? { powerMode: true as const } : {}),
     });
     if (verdict.decision === "REQUIRE_CONFIRMATION" && opts.confirmed) {
       // The user already approved this exact action: proceed on the remaining
@@ -1521,7 +2573,16 @@ export class AgentController {
     await this.deps.setAgentActive?.(tabId, true);
     let execResult;
     try {
-      execResult = await this.runRoutedExecution(action, task, tabId, snapshot.generation);
+      // Grounding for external executors: the eNN target is tab-local, so
+      // the live snapshot's role+name travels alongside for AX-tree lookup,
+      // plus the page URL so the host attaches to the SAME tab (it drives
+      // the shared Chrome instance with its own tab handles).
+      execResult = await this.runRoutedExecution(action, task, tabId, snapshot.generation, {
+        ...(guardTarget !== null && guardTarget.name !== ""
+          ? { node: { role: guardTarget.role, name: guardTarget.name } }
+          : {}),
+        url: snapshot.url,
+      });
     } finally {
       await this.deps.setAgentActive?.(tabId, false);
     }
@@ -1546,9 +2607,26 @@ export class AgentController {
       ? { type: "submit_completed", ...(target !== null ? { target: target.id } : {}) }
       : { type: "element_present" };
     const stateChanging = action.action === "type" || action.action === "select" || action.action === "press_key" || (action.action === "click" && target !== null && (target.role === "switch" || target.role === "checkbox" || target.role === "combobox"));
+    // Phase 2: the model sometimes invents an expect.target (e.g. e5/e37 on a
+    // two-element page) — format-valid, so the schema cannot catch it, but it
+    // is not a registry-known id. Letting it through would verify the action
+    // against a phantom. The submit_completed/element_present DEFAULT already
+    // carries the completion signal, so drop the phantom and verify against
+    // the default instead. WebGuard already ruled on the ACTION target above;
+    // this changes verification input only, never authorization.
+    let expectForVerify = action.expect ?? defaultExpect;
+    if (typeof expectForVerify.target === "string" && !targets.has(expectForVerify.target)) {
+      logger.info("agent: dropping unknown expect target; using default verification", {
+        taskId: task.taskId,
+        actionType: action.action,
+        droppedExpectTarget: expectForVerify.target,
+        defaultExpectType: defaultExpect.type,
+      });
+      expectForVerify = defaultExpect;
+    }
     const verification = await verifyFn({
       tabId,
-      expect: action.expect ?? defaultExpect,
+      expect: expectForVerify,
       identity: target !== null ? { role: target.role, name: target.name } : null,
       urlBefore: snapshot.url,
       actionGeneration: snapshot.generation,
@@ -1559,7 +2637,35 @@ export class AgentController {
       task.completedActions += 1;
       task.currentStep += 1;
       task.recoveryAttempts = 0;
-      task.lastVerifiedResult = `action ${action.action} verified`;
+      if (action.action === "browser_search") {
+        // PRD 6.10 §16/§18: search-mode tracking + verified search context.
+        // The query is task data (never a secret); the next step must ground
+        // result selection from the FRESH results observation (§12), and
+        // search success requires the results state — an attempted navigation
+        // alone is not proof (§18, settled + verified above).
+        // Strategy + Result-Type Routing (additive): the goal-derived routing
+        // directive travels in the verified observation so the next step
+        // continues goal-appropriately (open/play/read/link) instead of
+        // treating the found results as automatic completion.
+        const params = action.parameters as { query?: unknown } | undefined;
+        const query = typeof params?.query === "string" ? params.query : "";
+        task.searchMode = "browser";
+        const strategies = task.searchStrategies ?? selectSearchStrategies(task.goal, "browser");
+        task.searchStrategies = strategies;
+        const routing = routeGoalResult(task.goal);
+        task.pendingResultRouting =
+          routing.continuation === "search_complete"
+            ? null
+            : { continuation: routing.continuation, query, strategies };
+        task.lastVerifiedResult =
+          `browser search for "${query}" verified [strategy: ${strategies.join("+")}]. ${routing.directive}`;
+      } else {
+        task.lastVerifiedResult = `action ${action.action} verified`;
+        // A verified follow-up consumes any owed search-result routing: the
+        // agent acted on the fresh observation instead of stopping at a URL.
+        task.pendingResultRouting = null;
+      }
+      await this.settleAfterNavigation(task, tabId, action);
       this.recordEpisodeAction(task, snapshot, action, "executed", {
         success: verification.success,
         outcome: verification.outcome,
@@ -1577,7 +2683,23 @@ export class AgentController {
       // then everything is wrong" bug: every navigation spent one of only four
       // attempts, so any multi-step task died at the fourth navigation even
       // though every action had worked. Progress, not failure.
-      task.lastVerifiedResult = "page changed during action (navigation counted as progress)";
+      if (action.action === "browser_search") {
+        const params = action.parameters as { query?: unknown } | undefined;
+        const query = typeof params?.query === "string" ? params.query : "";
+        task.searchMode = "browser";
+        const strategies = task.searchStrategies ?? selectSearchStrategies(task.goal, "browser");
+        task.searchStrategies = strategies;
+        const routing = routeGoalResult(task.goal);
+        task.pendingResultRouting =
+          routing.continuation === "search_complete"
+            ? null
+            : { continuation: routing.continuation, query, strategies };
+        task.lastVerifiedResult =
+          `browser search for "${query}" changed the page (navigation counted as progress) [strategy: ${strategies.join("+")}]. ${routing.directive}`;
+      } else {
+        task.lastVerifiedResult = "page changed during action (navigation counted as progress)";
+        task.pendingResultRouting = null;
+      }
       task.completedActions += 1;
       task.currentStep += 1;
       this.recordEpisodeAction(task, snapshot, action, "executed", {
@@ -1586,6 +2708,7 @@ export class AgentController {
         timedOut: verification.timedOut,
         pageGeneration: verification.pageGeneration,
       });
+      await this.settleAfterNavigation(task, tabId, action);
       await store.save(task);
       return; // loop continues; the next step re-observes the new page
     }
@@ -1684,6 +2807,21 @@ export class AgentController {
       task.status = "ACTIVE";
       await store.save(task);
       await this.typeSensitiveValue(task, pending.field, tabId, store);
+      return;
+    }
+    // Phase 2: a generic "context" slot is not a real field — and an
+    // action-echo reply ("submit", "do it") is a continuation attempt, not an
+    // answer. Storing it as providedValues.context would pollute every future
+    // intent ("User already provided: context: Submit") and loop re-reasoning.
+    // Skip the store and simply continue the task instead.
+    if (pending.field === "context" && isActionEchoUtterance(transcript.text)) {
+      logger.info("agent: action-echo answer is not slot content; continuing task", {
+        taskId: task.taskId,
+      });
+      task.pendingQuestion = null;
+      task.status = "ACTIVE";
+      await store.save(task);
+      await this.run(task.taskId, tabId, store);
       return;
     }
     task.providedValues[pending.field] = transcript.text.trim();
@@ -1814,7 +2952,33 @@ export class AgentController {
       return;
     }
     const vote = matchConfirmation(transcript.text);
-    if (vote === "yes") {
+    // Phase 2 goal-echo: "submit" / "do it" / "yes, submit" restate the PENDING
+    // action and count as approval — scoped strictly to this pending action
+    // (isEchoApproval matches its verb or its target's name). The yes/no
+    // grammar still decides everything else; this only rescues replies the
+    // grammar votes "unclear" that unambiguously mean "do the pending thing".
+    let echoApproved = false;
+    if (vote !== "yes" && vote !== "no" && pending.action !== null) {
+      const echoLoad = this.deps.loadSnapshot ?? (async () => null);
+      const echoSnapshot = await echoLoad(tabId);
+      const echoTarget =
+        pending.action.target !== undefined
+          ? (echoSnapshot?.items.find((i) => i.id === pending.action?.target) ?? null)
+          : null;
+      echoApproved = isEchoApproval(
+        transcript.text,
+        pending.action,
+        echoTarget?.name ?? "",
+      );
+      if (echoApproved) {
+        logger.info("agent: goal-echo reply approves pending action", {
+          taskId: task.taskId,
+          actionType: pending.action.action,
+          targetId: pending.action.target,
+        });
+      }
+    }
+    if (vote === "yes" || echoApproved) {
       const action = pending.action;
       // Record consent BEFORE executing: if the click's verification is
       // inconclusive and the agent retries the same step, the retry must not
@@ -1875,6 +3039,11 @@ export class AgentController {
     silent = false,
   ): Promise<void> {
     this.runCounter += 1; // halt any in-flight loop
+    // Reject the in-flight reasoning fetch NOW (its catch site discards the
+    // result silently via isStepStale). The runCounter bump above is what the
+    // late-result guard observes, so the entry itself can go.
+    this.taskAbort.get(taskId)?.abort();
+    this.taskAbort.delete(taskId);
     for (const key of [...this.secrets.keys()]) {
       if (key.startsWith(`${taskId}:`)) this.secrets.delete(key);
     }
@@ -1883,6 +3052,7 @@ export class AgentController {
     this.approvals.delete(taskId);
     this.activeSkills.delete(taskId);
     this.executionModes.delete(taskId);
+    this.consecutiveAsk.delete(taskId);
     this.recorder.discard(taskId); // superseded/cancelled: never recorded
     await this.deps.stopAudio?.(true);
     await this.deps.setAgentActive?.(tabId, false);
@@ -2092,20 +3262,23 @@ export class AgentController {
     const kind = err instanceof QwenError ? err.kind : "unknown";
     const status = err instanceof QwenError ? err.status : undefined;
     const msgLower = err instanceof Error ? err.message.toLowerCase() : "";
+    let code: "RATE_LIMITED" | "AI_SERVICE_UNAVAILABLE" | "CANNOT_UNDERSTAND_PAGE" | "CANNOT_ACCESS_PAGE" = "AI_SERVICE_UNAVAILABLE";
+    if (kind === "rate_limit") code = "RATE_LIMITED";
+    else if (kind === "output" || msgLower.includes("output contract") || msgLower.includes("invalid outcome") || msgLower.includes("schema")) code = "CANNOT_UNDERSTAND_PAGE";
+    else if (kind === "transport" && (msgLower.includes("timeout") || msgLower.includes("network"))) code = "CANNOT_ACCESS_PAGE";
+    // Log the CLASSIFIED code (what the user hears), never a hardcoded one:
+    // a rate limit mislabeled AI_SERVICE_UNAVAILABLE sends debugging down
+    // the wrong path (this exact confusion happened in production logs).
     logger.error("agent: reasoning call failed", {
       taskId: task.taskId,
       ...(this.taskTurns.get(task.taskId) !== undefined
         ? { turnId: this.taskTurns.get(task.taskId) as string }
         : {}),
-      errorCode: "AI_SERVICE_UNAVAILABLE",
+      errorCode: code,
       kind,
       ...(status !== undefined ? { httpStatus: status } : {}),
       reason: err instanceof Error ? err.message : "unknown",
     });
-    let code: "RATE_LIMITED" | "AI_SERVICE_UNAVAILABLE" | "CANNOT_UNDERSTAND_PAGE" | "CANNOT_ACCESS_PAGE" = "AI_SERVICE_UNAVAILABLE";
-    if (kind === "rate_limit") code = "RATE_LIMITED";
-    else if (kind === "output" || msgLower.includes("output contract") || msgLower.includes("invalid outcome") || msgLower.includes("schema")) code = "CANNOT_UNDERSTAND_PAGE";
-    else if (kind === "transport" && (msgLower.includes("timeout") || msgLower.includes("network"))) code = "CANNOT_ACCESS_PAGE";
     await this.finish(task, "FAILED", code, tabId, store);
   }
 
@@ -2129,6 +3302,8 @@ export class AgentController {
     this.approvals.delete(task.taskId);
     this.activeSkills.delete(task.taskId);
     this.executionModes.delete(task.taskId);
+    this.consecutiveAsk.delete(task.taskId);
+    this.taskAbort.delete(task.taskId);
     this.emitProgress({
       taskId: task.taskId,
       kind: "done",
