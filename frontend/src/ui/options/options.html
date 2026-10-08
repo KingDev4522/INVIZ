@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="../ui.css" />
+    <title>INVIZ — Options</title>
+  </head>
+  <body>
+    <main>
+      <h1>Options &amp; backend connection</h1>
+      <p>
+        This extension holds <strong>no provider keys</strong>. All AI traffic
+        goes through your INVIZ backend, which holds the keys server-side.
+        Only the backend address (and an optional access token, if your backend
+        requires one) are stored here, on this machine.
+      </p>
+
+      <section aria-labelledby="backend-h">
+        <h2 id="backend-h">INVIZ backend</h2>
+        <label for="backend-url">Backend URL</label>
+        <input id="backend-url" type="text" size="60" autocomplete="off" spellcheck="false"
+          placeholder="http://127.0.0.1:8787" />
+        <label for="backend-token">Backend token (only if your backend sets BACKEND_TOKEN)</label>
+        <input id="backend-token" type="password" size="60" autocomplete="off" spellcheck="false" />
+        <div>
+          <button id="validate-backend" type="button">Validate backend (live)</button>
+          <span id="backend-result" role="status"></span>
+        </div>
+        <p>
+          Validation checks the backend is reachable, then runs its own provider
+          smoke checks (Groq models + Gemini synthesis) and reports each result.
+        </p>
+      </section>
+
+      <section aria-labelledby="mic-h">
+        <h2 id="mic-h">Microphone</h2>
+        <div>
+          <button id="enable-mic" type="button">Enable microphone</button>
+          <button id="test-mic" type="button">Test microphone (3s)</button>
+          <span id="mic-result" role="status"></span>
+        </div>
+        <p>
+          The test opens your mic for 3 seconds and reports the loudest level
+          it heard. Speak while it listens: a level above ~2% means the mic
+          works and voice capture should too.
+        </p>
+      </section>
+
+      <section aria-labelledby="diag-h">
+        <h2 id="diag-h">Voice diagnostics</h2>
+        <div>
+          <button id="run-diag" type="button">Run voice diagnostics</button>
+        </div>
+        <p>
+          Runs each voice layer in order and reports PASS/FAIL in plain words:
+          offscreen capture, backend reachability, this page's mic, and a live
+          transcription of a short clip. Speak during steps 1 and 3.
+        </p>
+        <pre id="diag-result" role="status"></pre>
+      </section>
+
+      <section aria-labelledby="activity-h">
+        <h2 id="activity-h">Recent voice activity</h2>
+        <div>
+          <button id="refresh-diag" type="button">Refresh</button>
+          <button id="clear-diag" type="button">Clear</button>
+        </div>
+        <p>
+          The last voice turns on this machine, newest first — what the mic
+          delivered and exactly why any turn failed. No DevTools needed.
+        </p>
+        <pre id="diag-log" role="status"></pre>
+      </section>
+
+      <div>
+        <button id="save" type="button">Save on this machine</button>
+        <span id="save-result" role="status"></span>
+      </div>
+    </main>
+    <script type="module" src="./options.js"></script>
+  </body>
+</html>

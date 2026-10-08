@@ -1,0 +1,41 @@
+# PRD 6.8 — Phase 8: Release
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.8 — Phase 8 Implementation (Release)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 8.
+**Objective:** Convert the proven build into a shippable artifact with reviewed permissions, enforced gates, finalized legal identity, and a credential guide a non-technical owner can follow. Nothing ships on trust — every gate has an artifact.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.7 exit green (qualified sites, passing demos, SLO report, backup videos, validated credentials).
+
+## 1. WORK ITEMS
+
+### 1.1 Manifest + permission review — REAL diff (PRD 4 §75)
+
+Line-by-line justification of every permission and host pattern against the implementation: each entry annotated with the code that requires it. `<all_urls>` (if still present from development) is either replaced by the qualified-site list from `site-qualification.md` or retained with a written owner-signed justification. Content-script `matches`, `all_frames`, and `run_at` pinned to the minimum the qualified flows need. The review output (`docs/permission-review.md`) is re-run on every manifest change thereafter.
+
+### 1.2 Release gates — REAL artifacts, no waivers except owner-signed
+
+- **R1 — All phase exits green:** `docs/phase-exits.md` checklist (6.0–6.7) signed off with dates and SLO/security report links.
+- **R2 — Zero secrets in repo:** automated scan (`gsk_`, `AIza`, key blocks, credential literals) passes in CI/pre-commit; scan report archived. Any historical secret in git history → history rewritten or keys rotated with rotation recorded.
+- **R3 — Docs versioned:** PRDs 1–5 + 6 master + 6.0–6.8 carry version/date/status headers; this release records the doc set hash.
+- **R4 — License finalized:** D6 closed — `LICENSE` file added (Apache-2.0 recommended), headers where required, third-party notices for bundled code.
+- **R5 — Product name finalized:** D5 closed — manifest `name`, popup branding, docs, and submission materials use the one decided name (no INVIZ/ContextLens mixing in user-visible surfaces).
+
+### 1.3 Packaging — REAL artifacts
+
+- Versioned zip of the load-unpacked build (`invis-voice-vX.Y.Z.zip` or decided product name), built reproducibly from a tagged commit (`npm run build` byte-identical on re-run, verified twice).
+- Options-page credential guide in non-technical EN+HI wording: where to get each key, where to paste it, how to press "Validate," what each success/failure message means. Tested by having a non-developer follow it end to end.
+- Bilingual quick-start card: the 4 shortcuts, what the earcons mean, how to stop the system, what to do when it says it can't access a page.
+
+## 2. EXIT CRITERIA (ALL REQUIRED)
+
+1. R1–R5 artifacts exist, linked, and dated. Any waived gate carries an owner-signed waiver with expiry.
+2. Reproducible build verified (two consecutive builds byte-identical).
+3. Non-developer credential-guide walkthrough passes (keys entered, validated, first voice command completed).
+4. Shippable package + guides handed over. Done — the project is released.
+
+*End of PRD 6.8 v1.0.*

@@ -1,0 +1,63 @@
+{
+  "manifest_version": 3,
+  "name": "INVIZ",
+  "version": "0.0.4",
+  "description": "INVIZ: AI-powered accessibility and browser assistance. Understand pages, act by voice — verified and safe.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "tabs",
+    "commands",
+    "offscreen",
+    "nativeMessaging",
+    "activeTab"
+  ],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "ui/popup/popup.html",
+    "default_title": "ContextLens + VoiceLens"
+  },
+  "options_page": "ui/options/options.html",
+  "commands": {
+    "toggle-voicelens": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Activate or deactivate VoiceLens"
+    },
+    "start-voice-capture": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+V",
+        "mac": "Command+Shift+V"
+      },
+      "description": "Start one voice capture turn"
+    },
+    "stop-cancel-task": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+X",
+        "mac": "Command+Shift+X"
+      },
+      "description": "Stop speech and cancel the active task"
+    },
+    "repeat-last": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Repeat the last announcement"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

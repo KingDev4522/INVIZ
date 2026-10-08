@@ -1,0 +1,47 @@
+# PRD 6.7 — Phase 7: Site Qualification & Demo Readiness
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.7 — Phase 7 Implementation (Site Qualification & Demo Readiness)
+**Parent:** PRD 6 (master build contract, §9 checklist, §10 SLOs). This document is normative for Phase 7.
+**Objective:** Take the proven system onto real websites the owner chooses, measure it honestly against the SLOs, and leave with two demos that pass repeatedly — plus a labeled recording as the network-dead contingency. No simulation is involved at any step: qualification runs the real pipeline, demos run live, backup is video.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.6 exit green (hardened system + audit note).
+- Owner supplies 2+ candidate sites (decision D3 matures here; §1selects from candidates using PRD 6 §9).
+
+## 1. WORK ITEMS
+
+### 1.1 Site qualification — REAL runs, recorded verdicts (PRD 6 §9)
+
+For each candidate site, execute the 6-item checklist with evidence (not opinion): injectability proof (content-script heartbeat on all task-path pages), target-region audit (registry dump proving no cross-origin/shadow encapsulation on the path, with skipped-region counts), no-CAPTCHA/no-OTP/no-payment in the scripted path (walkthrough record), 3-reload label-stability diff (accessible names stable; generation-scoping acknowledged), `aria-busy` settle timing vs verification budgets, Layer A weight vs 1MB cap. Results written to `docs/site-qualification.md` with PASS/FAIL per item. Failed items either disqualify the site or produce a scoped-content rule (documented restriction, e.g. "results region only") — never a silent workaround.
+
+### 1.2 Demo scripts — REAL utterances, REAL pages (EN + HI)
+
+- **Demo A (multi-step task):** scripted utterance sequence, expected announcement per step, expected verification verdicts, recovery branch if a step fails live (the script includes the failure branch — demos that cannot survive one failure are not ready).
+- **Demo B (ask-user form flow):** scripted missing-information sequence incl. one sensitive field (test credential, rotated after) + one confirmation + one cancellation variant performed live at least once.
+- Both scripts versioned in `docs/demo-scripts.md` with EN and HI utterance columns and word-for-word expected system speech. No utterance is improvised on demo day that wasn't passed in rehearsal.
+
+### 1.3 SLO measurement — REAL numbers (PRD 6 §10)
+
+Full SLO table measured on broadband desktop Chrome over the qualified sites: 100 focus events, 30 captures, 20 commands, 20 actions, 5/5 demo passes ×2 each, 16/16 security re-run, bilingual matrix. Published as `docs/slo-report.md`. Any miss is filed as a Phase 1–5 defect with a fix and re-measurement — misses are never "demo-day risk accepted" without an owner-signed waiver recorded in the report.
+
+### 1.4 Recorded backup videos — REAL recordings, labeled as such
+
+Each passing demo recorded (screen + system audio) immediately after a live 5/5 pass, archived as `docs/demo-backup-A.mp4` / `-B.mp4` with a burned-in "RECORDED DEMONSTRATION — [date]" caption. These are the network-dead contingency. They are video files, not software behavior, and are never presented as live.
+
+### 1.5 Credentials fulfillment run — REAL keys, recorded validation
+
+Owner provides C1–C3 (D2 fulfilled for production use); options-page validation tests executed and results recorded (`docs/credential-validation.md`: key fingerprints as last-4 only, model lists returned, EN+HI smoke syntheses). Rotation procedure documented (revoke → re-enter → re-validate, <5 min).
+
+## 2. EXIT CRITERIA (ALL REQUIRED)
+
+1. Two sites qualified with complete `site-qualification.md` (or one site + documented scoped rules for the second, owner-accepted).
+2. Demo A and Demo B each pass 5/5 live, in EN and HI, witnessed and logged.
+3. `slo-report.md` published with zero unwaived misses.
+4. Backup videos archived, labeled, and verified playable.
+5. Credential validation recorded; rotation drill completed once.
+
+*End of PRD 6.7 v1.0.*

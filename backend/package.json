@@ -1,0 +1,20 @@
+{
+  "name": "inviz-backend",
+  "version": "0.0.2",
+  "description": "INVIZ backend: authenticated AI gateway (Groq Qwen/Whisper, Gemini TTS). Holds all provider credentials. Never ships keys to the frontend.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "start": "node dist/backend/src/server.js",
+    "dev": "npm run build && npm start"
+  },
+  "author": "",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

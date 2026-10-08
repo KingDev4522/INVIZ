@@ -1,0 +1,65 @@
+# PRD 6.1 — Phase 1: ContextLens & Deterministic Fast Path
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.1 — Phase 1 Implementation (ContextLens & Deterministic Fast Path)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 1.
+**Objective:** The extension understands pages and announces focus deterministically — with **provably zero model calls**. This phase builds the product's foundation of trust: everything the fast path says comes from the live DOM, and the proof is in the network tab.
+
+> No credential required. No AI involved. Layer B (AI semantic state) is implemented as an empty-but-policy-bound store filled in Phase 4 (PRD 6.4).
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.0 exit green.
+- `test-page/` serving; one real candidate site pre-qualified against PRD 6 §9 items 1–2 (injectable, no cross-origin/shadow targets on the walk path).
+
+## 1. WORK ITEMS
+
+### 1.1 DOM/ARIA extractor — REAL (PRD 4 §8–9; PRD 3 §5–6)
+
+`src/content/dom-extractor.ts` + `aria-extractor.ts`:
+
+- **Role resolution:** explicit `role` → implicit native role table (covering at minimum: button, link, textbox, searchbox, combobox, checkbox, radio, select, textarea, heading 1–6, navigation, main, complementary, contentinfo, banner, dialog, alertdialog, menu, menuitem, tab, tablist, list, listitem, table/row/cell, img, progressbar, slider, switch) → `generic` fallback (generics are never announced as interactive).
+- **Accessible-name pipeline** in exact priority order: associated `<label>` → `aria-labelledby` chain (cycle-guarded) → `aria-label` → native mechanism (`alt`, `value` for button inputs, `legend`/`caption` where applicable) → text content (whitespace-collapsed, capped 200 chars) → `placeholder`/`title` as last resort, flagged `name-source: weak`.
+- **State extraction:** checked, expanded, selected, pressed, required, invalid, readonly, disabled, level, valuemin/max/now, `aria-busy`, modal-open. States ride with every announcement — a checkbox without its checked state is a defect.
+- **Field classification** per PRD 6 §5 / PRD 4 §29 (text, email, password, number, textarea, checkbox, radio, select, combobox, date, file + sensitive flag). Classification runs **before** any value is read: password/OTP field *values* are never extracted into strings — only `has-value: true/false`.
+- **Visibility filter:** `display:none`, `visibility:hidden`, `hidden` attribute, zero-area boxes, and `aria-hidden="true"` subtrees are excluded from the interactive set (but retained for injection-surface tests in Phase 6 — hidden text is still untrusted content).
+
+### 1.2 Element registry + generation lifecycle — REAL (PRD 4 §10–11; PRD 3 §26–28)
+
+- `element-registry.ts` holds live `Element` references in content-script memory only (never serialized — DOM nodes cannot cross into storage).
+- IDs `e1…eN` assigned per page-generation in document order over the interactive set; registry maps `generation → id → { element, role, name, state, fieldType }`.
+- Generation counter increments on every §1.4 trigger that changes page identity; old generations are dropped and any late-arriving action referencing them resolves to `STALE_TARGET` (rejection path unit-tested, executed for real in Phase 5).
+
+### 1.3 Focus monitor + announcement builder — REAL (PRD 2 §3–4)
+
+- `focus-monitor.ts`: capture-phase `focusin` listener; meaningful-element filter (interactive roles + headings with tabindex + `aria-live` regions gaining focus); identical-consecutive-announcement dedupe.
+- Template engine EN+HI: `{name}. {role}. {state}. {purpose-hint}.` Purpose hints come from a fixed local map (searchbox → "Type your search query" / "अपनी खोज लिखें"), never from page text, never from a model.
+- Verbosity config (`terse | standard`): terse omits purpose hints. Config lives in `chrome.storage.local`, editable from the popup without sighted assistance (labeled controls, full keyboard operability — the UI meets PRD 1 §20).
+
+### 1.4 Change detection — REAL (PRD 3 §29; PRD 4 §15–16, §86–88)
+
+Instrument exactly: full navigation (content-script re-inject), `history.pushState`/`replaceState` wrappers + `popstate`, `MutationObserver` (subtree, debounced 150ms) feeding the classifier, modal-root detection (`dialog[open]`, `role=dialog` visibility transitions), interactive/field/results count deltas, `aria-busy` busy→ready transitions, document-root replacement, `pageshow` (bfcache) revalidation comparing URL + root fingerprint.
+Minor mutations (text ticks, attribute churn, focus moves) update Layer A locally with **no further processing**. Each trigger in the list has a scripted DOM-event test on `test-page/`.
+
+### 1.5 Boundaries — REAL (PRD 4 §56–57; PRD 5 §71–73)
+
+- Non-injectable page (`chrome://`, Web Store, extension pages, PDF viewer): content script absent → service worker detects no heartbeat → speaks "I can't access this page. / मैं इस पेज तक नहीं पहुँच सकता।" Nothing else happens. Fail closed, never silent.
+- Cross-origin iframe / closed-shadow content: excluded from registry; if a user command targets such a region (Phase 5+), the honest response is "I can't access that section." The registry records *that* a region was skipped (count + frame label), so later phases can report coverage gaps instead of pretending full understanding.
+
+### 1.6 PageStateCache Layer A — REAL (PRD 6 §4.6; PRD 4 §12–13)
+
+Per-tab `page:{tabId}` in `chrome.storage.session`: identity (tab, URL, title, generation), element snapshot (id→role/name/state/fieldType — values excluded for sensitive fields), structure (headings, landmarks, forms, dialogs, relationships), focus. 1MB per-tab cap with LRU eviction of oldest generations; oversize serialization drops visible-text tails first and logs the cut (metadata only). Layer B store created with schema + 90s freshness policy enforced from day one (empty until PRD 6.4; stale/empty Layer B is excluded from every consumer).
+
+## 2. EXIT CRITERIA (ALL REQUIRED, EN + HI)
+
+1. Tab-walk over every interactive on `test-page/` and the qualified real site: correct name+role+state announced for 100% of targets (scripted audit, diffed against expected list).
+2. **Zero-network proof:** full Tab-walk with DevTools network recording shows zero calls to Groq/Google endpoints (deterministic fast path is genuinely model-free).
+3. Trigger coverage: each §1.4 trigger fired via scripted events produces the specified invalidation/update; minor-mutation soak (500 random ticks) produces zero full rebuilds.
+4. Stale rejection: action referencing generation N−1 after a generation bump returns `STALE_TARGET` through the registry API.
+5. Boundary honesty: `chrome://settings` + Web Store page + PDF viewer each produce the exact inaccessible-page announcement; cross-origin iframe region reports "skipped" count > 0 on a fixture page containing one.
+6. Budget compliance: Layer A snapshot of the heaviest task page < 1MB; oversize fixture page triggers the cut-log path.
+7. Bilingual: full walk passes in EN and HI (announcement templates, boundary messages, verbosity levels).
+
+*End of PRD 6.1 v1.0.*

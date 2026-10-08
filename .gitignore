@@ -1,0 +1,92 @@
+# ==============================================================================
+# INVIZ Monorepo .gitignore
+# ==============================================================================
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+
+# Environment Variables & Sensitive Credentials (CRITICAL)
+# Protect local API keys (Groq, OpenRouter, Tavily, Ollama tokens, etc.)
+.env
+.env.*
+*.env
+*.local
+# Explicitly keep example templates so developers know required schema
+!.env.example
+!*.env.example
+
+# Certificates & Private Keys
+*.pem
+*.key
+*.cert
+*.pfx
+*.p12
+
+# Build Outputs & Bundles
+dist/
+out/
+build/
+frontend/dist/
+backend/dist/
+*.tsbuildinfo
+
+# Extension Distribution Packages
+releases/
+*.zip
+*.crx
+
+# Logs & Runtime Server Outputs
+*.log
+**/*.log
+logs/
+test-page-8080.*.log
+
+# Testing, Coverage & Build Caches
+coverage/
+.nyc_output/
+.cache/
+.vite/
+**/.vite/
+.vitest/
+
+# Python bytecode (harness/ native-messaging sidecar)
+__pycache__/
+*.py[cod]
+*.pyo
+
+# AI Agent / Dev Tools Local State
+.kilo/
+.kilocode/
+.freebuff/
+
+# IDE & Editor Configurations
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*~
+.cursor/
+.claude/
+.gemini/
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/

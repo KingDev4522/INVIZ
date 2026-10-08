@@ -1,0 +1,53 @@
+# PRD 6.3 — Phase 3: Voice Input
+
+**Project:** ContextLens + VoiceLens
+**Document:** PRD 6.3 — Phase 3 Implementation (Voice Input)
+**Parent:** PRD 6 (master build contract). This document is normative for Phase 3.
+**Objective:** Real microphone capture turns into real transcripts in English, Hindi, and Hinglish — every transcription a live Groq call, every failure an honest spoken error. No canned transcripts, no fixture playback masquerading as recognition.
+
+> **Credential gate: C1 (Groq key with Whisper access) is required to enter this phase.** Fixture audio clips may exist as *input* test material (a speaker plays them into the mic); they are never injected past the microphone.
+
+---
+
+## 0. ENTRY CRITERIA
+
+- PRD 6.2 exit green (audio pipeline + half-duplex gate operational).
+- C1 provisioned and passing its options-page Whisper smoke test (3s live clip transcribes).
+- Mic grant flow (PRD 6.2 §1.6) verified granted on the dev machine.
+
+## 1. WORK ITEMS
+
+### 1.1 Capture pipeline — REAL (PRD 4 §17–19)
+
+- `src/offscreen/audio-capture.ts`: `MediaRecorder` Opus (`audio/webm;codecs=opus`, 32kbps mono) in the USER_MEDIA offscreen doc. Hard cap 60s per utterance (~250KB — single upload, no chunking protocol). Auto-stop on 1.5s sub-threshold energy via WebAudio analyser node. Manual stop via `start-voice-capture` toggle or `stop-cancel-task`.
+- Capture session protocol: SW sends `CAPTURE_START{requestId, reason: command|question-followup}` → offscreen plays listening earcon → records → `CAPTURE_STOP{reason: silence|manual|timeout|error}` → blob transferred to SW (never written to disk, never retained after transcription — buffer released immediately, PRD 5 §30).
+- Poison rules: below-energy audio (<0.5s effective content) is discarded silently and **never sent to the API** (cost + latency guard); over-60s audio is cut at 60s with a spoken notice, not silently truncated.
+
+### 1.2 Live Whisper via Groq — REAL, no intermediary fiction (PRD 4 §20, §34)
+
+- `src/ai/whisper-client.ts` calls `POST {base}/audio/transcriptions` live: model `whisper-large-v3-turbo`, fallback `whisper-large-v3` on model-error only (fallback switch logged). `language` unset (auto-detect) by default; user override `en|hi|auto` in config.
+- Output normalized to `{ text, lang: "en"|"hi"|"mixed", source: "voice", requestId, timestamp }` per PRD 6 §3.1 tagging rule (Devanagari present → `hi`; Latin+Hindi lexicon → `mixed`; else `en`). Raw text is never altered by tagging.
+- Every transcription request/response pair is logged as metadata only (duration, model, lang tag, char count). Audio bytes and (for Category C contexts in later phases) transcripts never persist.
+
+### 1.3 Transcript normalization — REAL
+
+Trim, whitespace collapse, punctuation repair for command parsing; Devanagari and roman forms both preserved verbatim (the confirmation matcher in PRD 6.5 needs both). Normalization is deterministic string processing — no model call, no "cleanup" that could change meaning (e.g., never drop a negation).
+
+### 1.4 Turn states — REAL (wired to stubs that Phase 5 completes)
+
+CAPTURING → PROCESSING → `VOICE_TRANSCRIPT` message to the Agent Controller. In this phase the controller is still a stub: it speaks an echo-confirmation ("Heard: {text}" / "सुना: {text}") via the Phase 2 pipeline and returns to IDLE. The stub records every transcript with its routing decision to a session log so Phase 5 can replay *real* transcripts during its own testing — replaying recorded real data as regression input is permitted; serving canned responses as live recognition is forbidden.
+
+### 1.5 Failure paths — REAL speech, REAL honesty (PRD 2 §22; PRD 4 §62)
+
+`VOICE_CAPTURE_FAILED` (device lost, permission revoked mid-session) and `TRANSCRIPTION_FAILED` (network, 429 after backoff, model error on both models) each speak a distinct EN+HI message with a retry offer ("Say capture again to retry. / पुनः प्रयास के लिए दोबारा बोलें।"). The system never invents a transcript on failure — silence or error speech are the only outputs.
+
+## 2. EXIT CRITERIA (ALL REQUIRED, LIVE GROQ, EN + HI)
+
+1. SLO: capture-stop → transcript available ≤2.5s p95 for ≤15s utterances (measured 30 samples).
+2. Accuracy set: 20 scripted utterances each in EN, HI-Devanagari, and Hinglish (commands + form values + names/addresses) — intent-preserving transcription ≥ 90% per language set, judged by a human listener against meaning, not WER.
+3. Silence auto-stop demonstrated at ~1.5s; 60s cap demonstrated with spoken notice; sub-0.5s taps produce zero network calls (DevTools proof).
+4. Self-talk immunity (with PRD 6.2 gate): 10s system speech at full volume with mic armed → zero transcripts produced.
+5. Failure honesty: airplane-mode capture attempt yields the exact `TRANSCRIPTION_FAILED` speech (EN+HI), no fabricated text, retry offer functional.
+6. Privacy: heap/storage audit after 20 captures shows zero retained audio blobs and zero persisted transcripts outside the in-memory session log; mic indicator behavior matches capture state exactly.
+
+*End of PRD 6.3 v1.0.*

@@ -1,0 +1,839 @@
+# PRD 1 — Product Requirements & Scope
+
+**Version:** 1.0 | **Date:** 2026-10-05 | **Status:** Authoritative (release gate R3: docs/release.md)
+
+## ContextLens + VoiceLens
+
+**Document Type:** Product Requirements Document
+**Scope:** Product definition, user needs, product behavior, requirements, boundaries, and success criteria
+**Product:** ContextLens + VoiceLens
+**Platform:** Web accessibility and browser assistance through a Chrome extension
+
+> **Document principle:** This PRD defines **what the product is, why it exists, what users can do with it, and what the product must guarantee**. It deliberately does not define implementation architecture, APIs, libraries, model providers, code structure, or development schedules.
+
+---
+
+# 1. Product Definition
+
+**ContextLens + VoiceLens** is an AI-powered accessibility and browser-assistance extension designed to make complex websites more understandable and operable through natural interaction.
+
+It combines two equal core capabilities:
+
+* **ContextLens** — understands the webpage and its current state.
+* **VoiceLens** — understands the user's voice and enables natural interaction.
+
+Together, they provide an intelligent accessibility layer over the web.
+
+The product allows users to:
+
+* navigate webpages using standard keyboard interaction;
+* receive concise semantic descriptions of focused elements;
+* understand the structure and relevant content of webpages;
+* ask natural-language questions about the current webpage;
+* locate webpage elements using natural language;
+* perform browser actions through natural-language commands;
+* complete multi-step tasks incrementally;
+* provide information when the system needs additional input;
+* receive spoken status, confirmation, error, and result information;
+* safely interact with webpages without granting AI unrestricted control over the browser.
+
+The product is **not intended to replace conventional accessibility mechanisms**. It adds an intelligent contextual layer that helps users understand and operate websites that may otherwise be difficult to navigate.
+
+---
+
+# 2. Problem Statement
+
+Modern websites frequently depend on complex visual interfaces and dynamic interactions.
+
+Even when accessibility metadata exists, blind users can encounter difficulty understanding and operating:
+
+* complex page structures;
+* unfamiliar layouts;
+* forms;
+* dynamic content;
+* modal dialogs;
+* navigation menus;
+* search results;
+* interactive controls;
+* error messages;
+* dynamically generated interfaces;
+* multi-step workflows.
+
+Traditional screen-reader interaction can expose the semantics supplied by a website, but users may still need to manually understand how those individual elements relate to their broader task.
+
+The problem is therefore not simply **accessing individual elements**.
+
+The problem is **understanding the current webpage in context and being able to operate it naturally**.
+
+ContextLens + VoiceLens addresses this by combining webpage understanding with natural user interaction.
+
+---
+
+# 3. Product Vision
+
+> **Make the web understandable and operable through natural interaction, regardless of how complicated the website interface is.**
+
+The product should enable a blind user to move through a webpage, understand what is currently relevant, and express higher-level intentions naturally rather than having to manually translate every task into individual interface operations.
+
+Examples include:
+
+* “What is this page about?”
+* “What do I need to fill in?”
+* “Find the application form.”
+* “Where is the login button?”
+* “Open the first result.”
+* “Search for Python tutorials.”
+* “Play the first video.”
+* “Set the video speed to 2x.”
+
+---
+
+# 4. Target Users
+
+## 4.1 Primary Users — Blind Users
+
+Blind users are the primary target audience.
+
+The product is designed around their need for:
+
+* audio-first interaction;
+* semantic understanding of webpage elements;
+* efficient keyboard navigation;
+* natural-language interaction;
+* contextual webpage understanding;
+* safe browser operation;
+* clear confirmation and error feedback.
+
+## 4.2 Secondary Users — Low-Vision Users
+
+Low-vision users can benefit from:
+
+* semantic webpage understanding;
+* natural-language interaction;
+* element location;
+* focus assistance;
+* visual highlighting;
+* spoken feedback.
+
+## 4.3 Secondary Users — Users Requiring Intelligent Web Assistance
+
+Users who have difficulty understanding or operating complex websites can use the system to:
+
+* understand unfamiliar webpages;
+* locate relevant controls;
+* complete multi-step interactions;
+* ask questions about webpage content;
+* interact with webpages through natural language.
+
+---
+
+# 5. Product Principles
+
+The product shall follow these principles.
+
+### 5.1 Accessibility First
+
+Accessibility is a primary product requirement, not an additional feature.
+
+### 5.2 Audio First for Blind Users
+
+Audio is the primary feedback channel for blind users.
+
+Visual feedback is supplementary.
+
+### 5.3 Context Over Generic Answers
+
+The system should understand the **actual current webpage** rather than respond only from generic knowledge.
+
+### 5.4 Human Intent Over Interface Complexity
+
+Users should be able to express what they want to accomplish naturally without needing to know the exact structure of the webpage.
+
+### 5.5 Incremental Action
+
+Complex tasks should progress through verified steps rather than blindly executing an entire pre-generated sequence.
+
+### 5.6 Safety Before Execution
+
+A webpage must never be treated as an authoritative source of instructions merely because it contains text that appears to instruct the system.
+
+### 5.7 User Remains in Control
+
+The system must not silently perform sensitive or irreversible actions when user confirmation is required.
+
+### 5.8 Verification Matters
+
+An action being attempted is not equivalent to an action succeeding.
+
+The product must communicate outcomes based on the observed result.
+
+### 5.9 Graceful Degradation
+
+Basic deterministic accessibility functionality should remain available when intelligent services are unavailable, wherever technically possible.
+
+### 5.10 Privacy by Necessity
+
+Only information necessary for the requested operation should be exposed to remote AI services.
+
+Sensitive information should receive stronger protection than ordinary webpage context.
+
+---
+
+# 6. Core Product Pillars
+
+## 6.1 ContextLens — Understands the Web
+
+ContextLens is responsible for understanding the current webpage.
+
+It provides contextual understanding of:
+
+* page structure;
+* headings;
+* links;
+* buttons;
+* forms;
+* input fields;
+* labels;
+* menus;
+* dialogs;
+* visible content;
+* interactive elements;
+* accessibility roles and states;
+* current focus;
+* relationships between relevant elements;
+* current page state.
+
+ContextLens does more than summarize a webpage.
+
+It must enable the product to relate user requests to **actual elements and states within the webpage**.
+
+---
+
+## 6.2 VoiceLens — Understands the Human
+
+VoiceLens provides the human interaction layer.
+
+It enables users to:
+
+* issue natural-language commands;
+* ask questions;
+* request information about the webpage;
+* request actions;
+* answer questions asked by the system;
+* interact conversationally during multi-step tasks.
+
+VoiceLens must understand that a user's utterance may refer to the current webpage and its current state.
+
+Voice interaction is therefore contextual rather than an isolated voice-command system.
+
+---
+
+## 6.3 Intelligent Reasoning
+
+The product includes an AI reasoning capability that combines:
+
+* user intent;
+* current webpage context;
+* relevant page state;
+* task progress;
+* observations following previous actions.
+
+Its role is to determine what the user means, what information is relevant, what should happen next, and whether additional information is required.
+
+The reasoning capability must **not** have unrestricted browser control.
+
+---
+
+## 6.4 Safety and Trust
+
+The product must maintain a security boundary between:
+
+**what a webpage says**
+
+and
+
+**what the user actually requested and what the system is permitted to do.**
+
+Webpage content must therefore be treated as untrusted information.
+
+The product must protect users against malicious webpage instructions, prompt injection, unsafe actions, and inappropriate autonomous execution.
+
+---
+
+## 6.5 Verified Browser Interaction
+
+The product must be capable of translating an approved user intention into browser interaction while maintaining awareness of the resulting webpage state.
+
+For meaningful actions:
+
+**Understand → Reason → Act → Observe → Verify → Continue**
+
+If an action fails, the product should reason from the new state rather than blindly repeating the same action.
+
+---
+
+# 7. Core User-Facing Capabilities
+
+## 7.1 VoiceLens Activation
+
+The user can activate or deactivate VoiceLens.
+
+Once activated, the product should become ready for:
+
+* voice interaction;
+* keyboard/focus assistance;
+* webpage understanding;
+* contextual assistance.
+
+Activation must not require the user to navigate an inaccessible interface.
+
+---
+
+## 7.2 Keyboard Accessibility Assistance
+
+The user can continue using conventional keyboard navigation.
+
+Supported interaction includes:
+
+* Tab;
+* Shift + Tab;
+* arrow-key navigation;
+* standard keyboard interaction.
+
+When focus moves to a meaningful element, the product should provide a concise semantic announcement.
+
+Examples:
+
+> “Search. Edit box. Type your search query.”
+
+> “Submit Application. Button. Activates the application.”
+
+> “Applications. Link.”
+
+Routine focus announcements should be fast and should not depend on remote AI reasoning.
+
+---
+
+## 7.3 Webpage Understanding
+
+The user can ask the system to explain the current webpage.
+
+Examples:
+
+* “What is this page about?”
+* “What are the important sections?”
+* “What do I need to fill in?”
+* “What can I do on this page?”
+
+The response should be based on the current webpage rather than generic information.
+
+---
+
+## 7.4 Natural-Language Element Finding
+
+Users can locate webpage elements using natural language.
+
+Examples:
+
+* “Find the application form.”
+* “Where is the login button?”
+* “Find the search box.”
+* “Take me to the first result.”
+
+The product should identify the relevant actual webpage element when possible and communicate its location or focus it as appropriate.
+
+---
+
+## 7.5 Natural-Language Browser Actions
+
+Users can request actions using natural language.
+
+Examples include:
+
+* opening a form;
+* clicking a button;
+* entering information;
+* selecting an option;
+* scrolling;
+* focusing an element;
+* navigating;
+* opening or closing browser tabs;
+* performing basic keyboard actions.
+
+The product must convert these intentions into controlled browser operations rather than allowing arbitrary AI-generated browser code.
+
+---
+
+# 8. Multi-Step Task Interaction
+
+The product must support tasks that require more than one interaction.
+
+The agent should operate incrementally.
+
+It must:
+
+1. understand the current goal;
+2. determine the next required step;
+3. perform an approved action;
+4. observe the resulting state;
+5. verify whether the expected result occurred;
+6. update its understanding;
+7. determine the next step if necessary.
+
+The product must **not** depend on generating one large action sequence and blindly executing it.
+
+---
+
+# 9. User-Provided Information
+
+A task may require information that the system does not currently have.
+
+For example:
+
+> “Fill out this application.”
+
+The system may need to ask:
+
+> “What is your email address?”
+
+The user can provide the information through voice interaction.
+
+The product must support this conversational loop:
+
+**Task → Missing information → Ask user → Receive answer → Continue task**
+
+The system must distinguish between:
+
+* a response to a question it just asked; and
+* a new independent user request.
+
+---
+
+# 10. Sensitive Information
+
+The product must distinguish ordinary user information from highly sensitive information.
+
+Ordinary information required to complete a task may be used when necessary for that task.
+
+Highly sensitive information—including credentials, passwords, CVV values, OTPs, payment-card information, and authentication secrets—requires stronger privacy handling.
+
+The product must:
+
+* avoid unnecessary exposure of sensitive information to AI reasoning;
+* avoid unnecessary storage of sensitive information;
+* avoid unnecessarily speaking sensitive information aloud;
+* avoid unnecessary logging of sensitive information;
+* prevent sensitive information from being treated as ordinary webpage context.
+
+The product must not assume that a user refusing to provide sensitive information somehow makes the information available. If sensitive information is required and unavailable, the system must request it appropriately or stop.
+
+---
+
+# 11. Page-State Understanding
+
+The product requires short-term understanding of the current webpage so that repeated interactions do not require rebuilding the entire understanding of the page from scratch.
+
+The product should maintain relevant information about:
+
+* the current page;
+* relevant webpage structure;
+* interactive elements;
+* element identity;
+* element roles and states;
+* current focus;
+* forms;
+* important relationships;
+* meaningful changes to the page.
+
+This understanding is **short-term working context**, not permanent user memory.
+
+The product must adapt when the webpage changes.
+
+---
+
+# 12. Dynamic Webpages
+
+Modern webpages can change without a full navigation.
+
+The product must be capable of responding to meaningful changes such as:
+
+* search results appearing;
+* dialogs opening;
+* forms loading;
+* menus expanding;
+* navigation occurring;
+* content being replaced;
+* errors appearing;
+* significant interactive elements changing.
+
+Minor webpage changes should not unnecessarily cause complete reprocessing of the page.
+
+The product should update relevant understanding when the page changes materially.
+
+---
+
+# 13. Output and Feedback
+
+The product provides two primary feedback channels.
+
+## 13.1 Audio Feedback — Primary
+
+Audio should communicate relevant information including:
+
+* focused elements;
+* webpage information;
+* answers;
+* action status;
+* successful actions;
+* errors;
+* confirmation requests;
+* questions requiring user input;
+* task completion;
+* task cancellation.
+
+## 13.2 Visual Feedback — Secondary
+
+For low-vision users and supplementary visual feedback, the product may:
+
+* focus the relevant element;
+* scroll the element into view;
+* highlight the relevant element;
+* display status information.
+
+Visual feedback must not be required for the primary blind-user interaction model.
+
+---
+
+# 14. Safety Requirements
+
+The product must treat webpage-derived information as **untrusted**.
+
+This includes webpage text and semantic information that may attempt to influence system behavior.
+
+The product must prevent webpage content from becoming an unauthorized command source.
+
+The product must:
+
+* detect potential prompt-injection attempts;
+* validate proposed browser actions;
+* enforce safety policies;
+* distinguish user intent from webpage instructions;
+* prevent arbitrary browser-code execution;
+* identify sensitive or irreversible operations;
+* request confirmation when required;
+* block unsafe actions.
+
+---
+
+# 15. Sensitive and Irreversible Actions
+
+The product must apply stronger controls to actions that could cause significant consequences.
+
+Examples include:
+
+* submitting sensitive forms;
+* making purchases;
+* sending messages or emails;
+* deleting accounts or data;
+* uploading files;
+* submitting credentials;
+* other irreversible or consequential operations.
+
+Such actions must not be silently performed merely because a webpage requested them.
+
+Where confirmation is required, the product must clearly communicate what action is about to occur and allow the user to approve or reject it.
+
+---
+
+# 16. User Control
+
+The user must retain control over the agent.
+
+The product must provide the ability to:
+
+* start interaction;
+* stop or cancel an active task;
+* respond to agent questions;
+* approve actions requiring confirmation;
+* reject actions requiring confirmation;
+* continue a task after providing missing information.
+
+User interaction must take precedence over autonomous task execution.
+
+If the user manually interacts with the webpage while an agent task is active, the system must not continue blindly based on stale assumptions.
+
+---
+
+# 17. Error and Failure Behavior
+
+The product must communicate failures clearly and consistently.
+
+The product should distinguish among conditions such as:
+
+* inability to access the page;
+* inability to understand the page;
+* inability to find the requested element;
+* action failure;
+* action blocked for safety;
+* confirmation required;
+* task cancellation;
+* task limit reached;
+* AI service unavailable.
+
+The system must not falsely report success when an action has not been verified.
+
+---
+
+# 18. Verification Requirement
+
+For meaningful browser actions, the product must determine whether the requested result actually occurred.
+
+Examples of successful outcomes include:
+
+* the expected element appeared;
+* navigation occurred;
+* a form changed;
+* a dialog opened;
+* a requested state was reached.
+
+If the expected result is not observed, the product must communicate the failure or attempt controlled recovery when appropriate.
+
+The product must not equate **“action was attempted”** with **“task succeeded.”**
+
+---
+
+# 19. Privacy Requirements
+
+The product must follow data minimization principles.
+
+It should send only the information necessary for the requested operation to remote AI services.
+
+Requirements include:
+
+* minimize transmitted webpage context;
+* minimize transmitted user information;
+* protect sensitive information;
+* avoid unnecessary retention;
+* avoid unnecessary logging;
+* prevent sensitive information from becoming part of persistent product memory;
+* clearly maintain the distinction between current task context and permanent user memory.
+
+The product architecture should remain compatible with stronger privacy-preserving, locally processed AI capabilities in the future.
+
+---
+
+# 20. Accessibility Requirements
+
+The product must be usable without requiring visual interaction.
+
+Core functionality must prioritize:
+
+* keyboard accessibility;
+* audio feedback;
+* concise semantic descriptions;
+* clear state announcements;
+* understandable error messages;
+* explicit confirmation requests;
+* predictable interaction behavior;
+* user cancellation.
+
+The extension must not depend exclusively on color, visual position, icons, or visual status indicators to communicate essential information.
+
+---
+
+# 21. Responsiveness Requirements
+
+Routine accessibility interactions must remain responsive.
+
+In particular:
+
+* ordinary keyboard/focus navigation must not require unnecessary AI reasoning;
+* focused-element descriptions should be generated from immediately available semantic information;
+* AI-powered processing should not unnecessarily block basic accessibility functionality;
+* page preparation should occur without forcing the user to wait before basic accessibility feedback is available.
+
+---
+
+# 22. Reliability Requirements
+
+The product must prioritize correctness over blind automation.
+
+It must:
+
+* operate from the current webpage state;
+* avoid blindly executing stale actions;
+* verify meaningful actions;
+* recover from failures in a controlled manner;
+* stop when it cannot safely determine what should happen;
+* communicate uncertainty or failure rather than inventing success.
+
+---
+
+# 23. Security Requirements
+
+The product must maintain a strict boundary between reasoning and execution.
+
+The AI must never receive unrestricted browser privileges.
+
+The product must:
+
+* treat webpages as untrusted;
+* prevent arbitrary JavaScript execution by the AI;
+* validate proposed actions;
+* enforce safety rules;
+* protect sensitive operations;
+* require confirmation where appropriate;
+* prevent malicious webpage instructions from overriding user intent or system safety rules.
+
+---
+
+# 24. Graceful Degradation
+
+If intelligent services become unavailable, the product should retain deterministic functionality wherever technically possible.
+
+For example, basic:
+
+**Focus → semantic understanding → audio announcement**
+
+should remain independent of unnecessary remote reasoning.
+
+Failure of an AI service must not automatically make all accessibility functionality unusable.
+
+---
+
+# 25. Explicit Product Boundaries
+
+ContextLens + VoiceLens is **not**:
+
+* a generic chatbot;
+* a simple voice-to-text extension;
+* merely a screen reader;
+* a replacement for conventional screen readers;
+* a generic RPA system;
+* an unrestricted computer-use agent;
+* an LLM with unrestricted browser privileges;
+* a system that allows an AI model to execute arbitrary JavaScript;
+* a system that blindly executes pre-generated action scripts;
+* a system that repeatedly sends the entire webpage for every interaction;
+* a permanent long-term user-memory system.
+
+---
+
+# 26. Explicit Exclusions
+
+The product does not require:
+
+* building a custom web browser;
+* a mobile application;
+* training a new foundation model;
+* unrestricted autonomous computer control;
+* arbitrary AI-generated browser code;
+* permanent long-term user memory;
+* dozens of website-specific integrations;
+* support for every possible browser/system page;
+* replacing the operating system's complete accessibility stack.
+
+These exclusions define the product boundary and prevent the product from becoming an unrestricted general-purpose automation system.
+
+---
+
+# 27. Product Success Criteria
+
+The product is successful when a primary blind user can use it to meaningfully understand and operate a complex webpage through a combination of keyboard and natural voice interaction.
+
+Success should be demonstrated through the following capabilities:
+
+### Accessibility
+
+* The user can navigate meaningful webpage elements using standard keyboard interaction.
+* Focused elements receive concise semantic audio descriptions.
+* Basic accessibility remains usable without unnecessary AI calls.
+
+### Understanding
+
+* The user can ask questions about the current webpage.
+* The system can identify relevant webpage elements from natural-language requests.
+* The system understands meaningful changes to the current webpage.
+
+### Voice Interaction
+
+* The user can issue natural-language browser requests.
+* The user can answer questions asked by the system.
+* The interaction can continue across multiple task steps.
+
+### Task Execution
+
+* The system can perform supported browser actions.
+* Actions are based on the user's intent and current webpage state.
+* Meaningful actions are verified before being treated as successful.
+* Failed actions can result in controlled recovery or a clear failure message.
+
+### Safety
+
+* Webpage instructions are not automatically treated as trusted commands.
+* AI-generated actions cannot directly execute arbitrary browser code.
+* Sensitive and irreversible operations receive appropriate protection.
+* The user can stop or cancel an active task.
+
+### Privacy
+
+* Only necessary information is exposed to AI services.
+* Sensitive information receives stronger handling.
+* Sensitive data is not unnecessarily logged, spoken, or retained.
+
+### User Experience
+
+* Audio remains the primary interface for blind users.
+* The system communicates clearly when it needs information, confirmation, or cannot proceed.
+* User interaction remains authoritative over autonomous behavior.
+
+---
+
+# 28. Product Terminology
+
+| Term                            | Product Meaning                                                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **ContextLens**                 | The product capability responsible for understanding the webpage and its current state.                                        |
+| **VoiceLens**                   | The product capability responsible for understanding and interacting with the user's voice.                                    |
+| **Page State**                  | The current relevant state and structure of the webpage.                                                                       |
+| **Page-State Cache**            | Short-term working context representing the current webpage; it is not permanent user memory.                                  |
+| **Task State**                  | The user's active goal, progress, required information, confirmations, and task status.                                        |
+| **Reasoning Model**             | The AI capability that interprets user intent and webpage context and determines appropriate next steps.                       |
+| **Structured Action**           | A constrained representation of an intended browser operation rather than arbitrary executable code.                           |
+| **WebGuard**                    | The product's safety boundary that evaluates proposed actions before browser execution.                                        |
+| **Browser Executor**            | The product capability responsible for carrying out approved browser operations.                                               |
+| **Verification**                | The process of determining whether an attempted action actually produced the expected result.                                  |
+| **Focus Announcement**          | A concise semantic audio description of the currently focused webpage element.                                                 |
+| **Sensitive Action**            | An action involving significant privacy, security, financial, communication, deletion, or other consequential impact.          |
+| **Confirmation**                | Explicit user approval required before a protected action proceeds.                                                            |
+| **Prompt Injection**            | Untrusted webpage content attempting to manipulate the AI into violating the user's intent or system rules.                    |
+| **Agentic Task**                | A task requiring the product to reason, perform one or more actions, observe results, and continue based on the updated state. |
+| **Deterministic Accessibility** | Accessibility behavior that can operate from directly available webpage semantics without unnecessary AI reasoning.            |
+
+---
+
+# 29. Fundamental Product Model
+
+The product must **not** be understood as:
+
+> **Voice → AI → Browser**
+
+The product model is:
+
+> **VoiceLens understands the human.**
+> **ContextLens understands the web.**
+> **The reasoning capability reasons over both.**
+> **WebGuard determines whether a proposed action is safe.**
+> **The Browser Executor performs the approved action.**
+> **Verification determines what actually happened.**
+> **The product communicates the result to the user.**
+
+For routine accessibility:
+
+> **Focus → ContextLens → Semantic Description → Audio**
+
+For agentic tasks:
+
+> **Understand → Reason → Ask/Act → Observe → Verify → Update → Repeat**
+
+This is the **Product Requirements & Scope** definition of ContextLens + VoiceLens. It intentionally stops at product behavior and requirements; implementation architecture, specific APIs, libraries, model/provider choices, browser protocols, code structure, and build schedules belong in the subsequent PRDs.  
