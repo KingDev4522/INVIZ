@@ -2,18 +2,67 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="stylesheet" href="../ui.css" />
+    <link rel="stylesheet" href="./popup.css" />
     <title>INVIZ</title>
   </head>
-  <body>
-    <main>
-      <h1>INVIZ</h1>
-      <p id="status" role="status">Loading…</p>
-      <button id="capture" type="button">Start voice capture</button>
-      <button id="toggle" type="button">Enable VoiceLens</button>
-      <button id="power" type="button">Enable Power mode</button>
-      <button id="harness" type="button">Enable Harness exec</button>
-      <p><a id="options-link" href="#">Options &amp; API keys</a></p>
+  <body class="popup-page">
+    <main class="pop">
+      <header class="pop-head">
+        <span class="pop-mark" aria-hidden="true"></span>
+        <h1 class="pop-wordmark">INVIZ</h1>
+        <span class="pop-chip" id="state-chip" data-tone="loading">
+          <span class="pop-dot" aria-hidden="true"></span>
+          <span id="state">Loading</span>
+        </span>
+      </header>
+
+      <p class="pop-status" id="status" role="status">Loading…</p>
+
+      <button class="pop-listen" id="capture" type="button" data-state="idle">
+        <svg class="pop-listen-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3.5a2.5 2.5 0 0 0-2.5 2.5v5a2.5 2.5 0 0 0 5 0V6A2.5 2.5 0 0 0 12 3.5Z" />
+          <path d="M6 11a6 6 0 0 0 12 0" />
+          <path d="M12 17v3.5" />
+        </svg>
+        <svg class="pop-listen-icon pop-listen-icon-stop" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
+        </svg>
+        <span class="pop-listen-label" id="capture-label">Start voice capture</span>
+        <kbd class="pop-listen-kbd" id="capture-keys">Ctrl+Shift+V</kbd>
+      </button>
+
+      <div class="pop-rows">
+        <button class="pop-row" id="toggle" type="button" role="switch" aria-checked="false">
+          <span class="pop-row-text">
+            <span class="pop-row-label" id="toggle-label">VoiceLens</span>
+            <span class="pop-row-note" id="toggle-note">Run voice commands on the active tab.</span>
+          </span>
+          <span class="pop-switch" aria-hidden="true"></span>
+        </button>
+        <button class="pop-row" id="power" type="button" role="switch" aria-checked="false">
+          <span class="pop-row-text">
+            <span class="pop-row-label" id="power-label">Power mode</span>
+            <span class="pop-row-note" id="power-note">Skip confirmation prompts before actions.</span>
+          </span>
+          <span class="pop-switch" aria-hidden="true"></span>
+        </button>
+        <button class="pop-row" id="harness" type="button" role="switch" aria-checked="false">
+          <span class="pop-row-text">
+            <span class="pop-row-label" id="harness-label">Harness exec</span>
+            <span class="pop-row-note" id="harness-note">Run actions in the local browser harness.</span>
+          </span>
+          <span class="pop-switch" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <footer class="pop-foot">
+        <a class="pop-link" id="options-link" href="#">Options &amp; API keys</a>
+        <span class="pop-hint" id="toggle-keys">Ctrl+Shift+Y</span>
+      </footer>
     </main>
     <script type="module" src="./popup.js"></script>
   </body>

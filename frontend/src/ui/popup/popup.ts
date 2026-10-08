@@ -2,6 +2,9 @@
  * Popup: status + VoiceLens toggle (PRD 6.0 §1.3).
  * Fully keyboard-operable, labeled controls (PRD 1 §20).
  * Missing credentials → explicit setup message, never a dead UI.
+ *
+ * The three modes are switches, not Enable/Disable buttons: state is always
+ * visible, so a row never has to be read twice to know whether it is on.
  */
 import {
   STORAGE_KEY_CONFIG,
@@ -9,13 +12,18 @@ import {
 } from "../../../../shared/constants.js";
 
 const statusEl = document.getElementById("status") as HTMLParagraphElement;
-const toggleEl = document.getElementById("toggle") as HTMLButtonElement;
+const chipEl = document.getElementById("state-chip") as HTMLSpanElement;
+const stateEl = document.getElementById("state") as HTMLSpanElement;
 const captureEl = document.getElementById("capture") as HTMLButtonElement;
+const captureLabelEl = document.getElementById("capture-label") as HTMLSpanElement;
+const captureKeysEl = document.getElementById("capture-keys") as HTMLElement;
+const toggleEl = document.getElementById("toggle") as HTMLButtonElement;
 const powerEl = document.getElementById("power") as HTMLButtonElement;
 const harnessEl = document.getElementById("harness") as HTMLButtonElement;
 const optionsLink = document.getElementById("options-link") as HTMLAnchorElement;
 
 const isHindi = (navigator.language || "en").toLowerCase().startsWith("hi");
+const isApple = /\b(mac|iphone|ipad|ipod)\b/i.test(navigator.platform || "");
 
 interface OperatorFlags {
   voicelensEnabled?: boolean;
@@ -41,30 +49,86 @@ async function writeFlags(patch: Partial<OperatorFlags>): Promise<void> {
   });
 }
 
+const KEYS = {
+  capture: isApple ? "⌘⇧V" : "Ctrl+Shift+V",
+  toggle: isApple ? "⌘⇧Y" : "Ctrl+Shift+Y",
+};
+captureKeysEl.textContent = KEYS.capture;
+(document.getElementById("toggle-keys") as HTMLElement).textContent =
+  `${KEYS.toggle} toggles VoiceLens`;
+
 const STR = {
+  stateLoading: isHindi ? "लोड हो रहा है" : "Loading",
+  stateReady: isHindi ? "तैयार" : "Ready",
+  stateSetup: isHindi ? "सेटअप ज़रूरी" : "Setup needed",
+  stateListening: isHindi ? "सुन रहा हूँ" : "Listening",
   loading: isHindi ? "लोड हो रहा है…" : "Loading…",
   setupNeeded: isHindi
     ? "AI कुंजियाँ सेट नहीं हैं। Options में जाकर कुंजियाँ जोड़ें।"
     : "API keys are not set. Open Options to add your keys.",
-  ready: isHindi ? "तैयार। VoiceLens बंद है।" : "Ready. VoiceLens is off.",
-  on: isHindi ? "तैयार। VoiceLens चालू है।" : "Ready. VoiceLens is on.",
-  enable: isHindi ? "VoiceLens चालू करें" : "Enable VoiceLens",
-  disable: isHindi ? "VoiceLens बंद करें" : "Disable VoiceLens",
+  ready: isHindi ? "VoiceLens बंद है।" : "VoiceLens is off.",
+  on: isHindi ? "VoiceLens चालू है।" : "VoiceLens is on.",
   capture: isHindi ? "आवाज़ से कमांड दें" : "Start voice capture",
   capturing: isHindi ? "सुन रहा हूँ…" : "Listening…",
   captureFailed: isHindi
     ? "आवाज़ रिकॉर्ड नहीं हो पाई। पुनः प्रयास करें।"
     : "Voice capture failed. Please try again.",
+  powerOn: isHindi
+    ? " पावर मोड चालू: पुष्टि नहीं माँगी जाएगी।"
+    : " Power mode on: no confirmations will be asked.",
+  tabBlocked: isHindi
+    ? " इस पेज तक पहुँच नहीं है।"
+    : " This page can't be accessed.",
+  voicelensLabel: "VoiceLens",
+  voicelensNote: isHindi
+    ? "सक्रिय टैब पर आवाज़ से काम करें।"
+    : "Run voice commands on the active tab.",
+  powerLabel: isHindi ? "पावर मोड" : "Power mode",
+  powerNote: isHindi
+    ? "कार्रवाई से पहले पुष्टि नहीं माँगी जाएगी।"
+    : "Skip confirmation prompts before actions.",
+  harnessLabel: isHindi ? "हार्नेस एक्सेक" : "Harness exec",
+  harnessNote: isHindi
+    ? "लोकल ब्राउज़र हैनेस में कार्रवाई चलाएँ।"
+    : "Run actions in the local browser harness.",
 };
+
+(document.getElementById("toggle-label") as HTMLElement).textContent =
+  STR.voicelensLabel;
+(document.getElementById("toggle-note") as HTMLElement).textContent =
+  STR.voicelensNote;
+(document.getElementById("power-label") as HTMLElement).textContent =
+  STR.powerLabel;
+(document.getElementById("power-note") as HTMLElement).textContent =
+  STR.powerNote;
+(document.getElementById("harness-label") as HTMLElement).textContent =
+  STR.harnessLabel;
+(document.getElementById("harness-note") as HTMLElement).textContent =
+  STR.harnessNote;
+
+type Tone = "loading" | "ready" | "live" | "setup";
+
+let tone: Tone = "loading";
+let toneText = STR.stateLoading;
+
+function setChip(next: Tone, text: string): void {
+  tone = next;
+  toneText = text;
+  chipEl.dataset.tone = next;
+  stateEl.textContent = text;
+}
 
 /**
  * Runs one voice turn. The worker owns the whole flow (tab resolution,
- * offscreen capture, transcription, agent routing); the popup only reports
- * the outcome, so the button behaves identically to the keyboard shortcut.
+ * offscreen capture, transcription, agent routing); the popup only reports the
+ * outcome, so the button behaves identically to the keyboard shortcut.
  */
 async function startVoiceCapture(): Promise<void> {
   captureEl.disabled = true;
-  captureEl.textContent = STR.capturing;
+  captureEl.dataset.state = "listening";
+  captureLabelEl.textContent = STR.capturing;
+  captureKeysEl.hidden = true;
+  setChip("live", STR.stateListening);
   try {
     const res = (await chrome.runtime.sendMessage({
       type: "START_VOICE_TURN",
@@ -78,7 +142,10 @@ async function startVoiceCapture(): Promise<void> {
     statusEl.textContent = STR.captureFailed;
   } finally {
     captureEl.disabled = false;
-    captureEl.textContent = STR.capture;
+    captureEl.dataset.state = "idle";
+    captureLabelEl.textContent = STR.capture;
+    captureKeysEl.hidden = false;
+    setChip(tone, toneText);
   }
 }
 
@@ -98,14 +165,17 @@ async function credentialsPresent(): Promise<boolean> {
 
 async function render(): Promise<void> {
   statusEl.textContent = STR.loading;
+  setChip("loading", STR.stateLoading);
   const [credsOk, flags] = await Promise.all([credentialsPresent(), readFlags()]);
   const enabled = flags.voicelensEnabled === true;
   const power = flags.powerMode === true;
   const harness = flags.harnessEnabled === true;
   if (!credsOk) {
     statusEl.textContent = STR.setupNeeded;
+    setChip("setup", STR.stateSetup);
   } else {
     statusEl.textContent = enabled ? STR.on : STR.ready;
+    setChip("ready", STR.stateReady);
   }
   // Per-tab page support (PRD 6.1 §1.5): honest "can't access" surfacing.
   try {
@@ -116,27 +186,19 @@ async function render(): Promise<void> {
         String(tab.id)
       ];
       if (flag !== undefined && flag.startsWith("unsupported")) {
-        statusEl.textContent += isHindi
-          ? " इस पेज तक पहुँच नहीं है।"
-          : " This page can't be accessed.";
+        statusEl.textContent += STR.tabBlocked;
       }
     }
   } catch {
     // tabs permission edge: status without support line is still truthful.
   }
-  toggleEl.textContent = enabled ? STR.disable : STR.enable;
-  powerEl.textContent = power
-    ? isHindi ? "पावर मोड बंद करें" : "Disable Power mode"
-    : isHindi ? "पावर मोड चालू करें" : "Enable Power mode";
-  harnessEl.textContent = harness
-    ? isHindi ? "हार्नेस बंद करें" : "Disable Harness exec"
-    : isHindi ? "हार्नेस चालू करें" : "Enable Harness exec";
-  if (power && !statusEl.textContent.includes("Power")) {
-    statusEl.textContent += isHindi
-      ? " पावर मोड चालू: पुष्टि नहीं माँगी जाएगी।"
-      : " Power mode on: no confirmations will be asked.";
+  toggleEl.setAttribute("aria-checked", String(enabled));
+  powerEl.setAttribute("aria-checked", String(power));
+  harnessEl.setAttribute("aria-checked", String(harness));
+  if (power && !statusEl.textContent.includes(STR.powerLabel)) {
+    statusEl.textContent += STR.powerOn;
   }
-  captureEl.textContent = STR.capture;
+  captureLabelEl.textContent = STR.capture;
   // Voice capture needs the backend; without it the turn cannot transcribe.
   captureEl.disabled = false;
 }
