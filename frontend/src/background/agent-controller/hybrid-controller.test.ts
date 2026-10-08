@@ -172,8 +172,8 @@ describe("default mode is unchanged", () => {
   });
 });
 
-describe("hybrid mode is sparse-triggered and AX-first", () => {
-  it("stays text-only on dense pages even with capture available", async () => {
+describe("hybrid mode attaches every turn and stays AX-first", () => {
+  it("attaches the screenshot on dense pages too, keeping the full AX text", async () => {
     const h = make({
       contextMode: "hybrid",
       captureScreenshot: async () => SCREENSHOT,
@@ -181,7 +181,8 @@ describe("hybrid mode is sparse-triggered and AX-first", () => {
     });
     await ask(h);
     const input = h.inputs[0]!;
-    expect(input.image).toBeUndefined();
+    expect(input.image).toBeDefined();
+    expect(input.image?.b64).toBe("aGVsbG8=");
     expect(input.userPayload).toContain("FORMS:");
     expect(input.userPayload).toContain("LANDMARKS:");
     expect(input.userPayload).toContain("ELEMENTS:");

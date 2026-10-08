@@ -5,7 +5,7 @@
  * Run: npm test
  */
 import { describe, expect, it } from "vitest";
-import { AgentController, resolveOpenSiteDestination, resolveOpenSitePrefix, type PageSnapshotLike } from "./controller.js";
+import { AgentController, resolveOpenSiteDestination, resolveOpenSitePrefix, resolveSiteAnchor, type PageSnapshotLike } from "./controller.js";
 
 import type { ReasonInput } from "../../ai/qwen-client.js";
 import type { AgentOutcome, ExecutionResult } from "../../../../shared/types.js";
@@ -69,6 +69,8 @@ function makeHarness(opts: {
   settleResult?: boolean;
   /** Trusted-operator mode: safety gates bypassed (correctness BLOCKs stay). */
   powerMode?: boolean;
+  /** Live tab URL for site-anchor / page-aware guards. Absent = previous behavior. */
+  tabUrl?: string;
 } = {}): Harness {
   let now = opts.nowStart ?? 1_000_000;
   const spoken: Harness["spoken"] = [];
@@ -116,6 +118,7 @@ function makeHarness(opts: {
     },
     stopAudio: async () => undefined,
     setAgentActive: async () => undefined,
+    ...(opts.tabUrl !== undefined ? { getTabUrl: async () => opts.tabUrl as string } : {}),
     loadSnapshot: async () => SNAPSHOT,
     ...(opts.settleResult !== undefined
       ? {
@@ -211,28 +214,48 @@ describe("Q&A and simple action flows", () => {
       expect(resolveOpenSiteDestination("open YouTube and find music")).toBeNull();
     });
 
-    it("opens YouTube directly: no reasoning call, no search, no question", async () => {
+    it("opens YouTube when the model decides to navigate (free will, grounded homepage)", async () => {
       const h = makeHarness({
-        outcomes: [{ type: "task_complete", text: "Done." }],
+        outcomes: [
+          {
+            type: "action",
+            action: {
+              action: "navigate",
+              parameters: { url: "https://www.youtube.com/" },
+              expect: { type: "navigation_completed" },
+            },
+          },
+          { type: "task_complete", text: "Done." },
+        ],
       });
       await h.controller.routeVoice(voice("open YouTube"), 7);
       const nav = h.executed.find((e) => e.action === "navigate");
       expect(nav?.url).toBe("https://www.youtube.com/");
-      // The only reasoning call is the completion step after navigation.
-      expect(h.reasonCalls()).toBe(1);
+      // Free will: the model reasons first, then navigates, then completes.
+      expect(h.reasonCalls()).toBe(2);
       expect(h.spoken.some((s) => /which.*url|results/i.test(s.text))).toBe(false);
       expect(h.current()?.status).toBe("COMPLETE");
       expect(h.current()?.completedActions).toBe(1);
     });
 
-    it("opens GitHub directly and never triggers the contributors skill", async () => {
+    it("opens GitHub when the model decides to navigate and never triggers the contributors skill", async () => {
       const h = makeHarness({
-        outcomes: [{ type: "task_complete", text: "Done." }],
+        outcomes: [
+          {
+            type: "action",
+            action: {
+              action: "navigate",
+              parameters: { url: "https://github.com/" },
+              expect: { type: "navigation_completed" },
+            },
+          },
+          { type: "task_complete", text: "Done." },
+        ],
       });
       await h.controller.routeVoice(voice("open GitHub"), 7);
       const nav = h.executed.find((e) => e.action === "navigate");
       expect(nav?.url).toBe("https://github.com/");
-      expect(h.reasonCalls()).toBe(1);
+      expect(h.reasonCalls()).toBe(2);
       expect(h.current()?.status).toBe("COMPLETE");
     });
 
@@ -260,17 +283,66 @@ describe("Q&A and simple action flows", () => {
         expect(resolveOpenSitePrefix("open youtubemusic and play")).toBeNull();
       });
 
-      it("navigates first, then reasons over the fresh page toward the full goal", async () => {
+      it("navigates when the model decides to, then reasons over the fresh page toward the full goal", async () => {
         const h = makeHarness({
-          outcomes: [{ type: "task_complete", text: "Done." }],
+          outcomes: [
+            {
+              type: "action",
+              action: {
+                action: "navigate",
+                parameters: { url: "https://www.youtube.com/" },
+                expect: { type: "navigation_completed" },
+              },
+            },
+            { type: "task_complete", text: "Done." },
+          ],
         });
         await h.controller.routeVoice(voice("open YouTube and find music"), 7);
-        // Deterministic first step: no reasoning spent on the navigation.
+        // Free will: the model reasons first, then navigates.
         expect(h.executed[0]).toEqual({ action: "navigate", target: undefined, value: undefined, url: "https://www.youtube.com/" });
-        // The task stays alive: exactly one reasoning call resolves the rest.
-        expect(h.reasonCalls()).toBe(1);
+        expect(h.reasonCalls()).toBe(2);
         expect(h.current()?.status).toBe("COMPLETE");
         expect(h.current()?.completedActions).toBe(1);
+      });
+    });
+
+    describe("site-anchored goals (blind user never shuttles pages)", () => {
+      it("resolves a site named anywhere in the goal", () => {
+        expect(resolveSiteAnchor("play Baby on YouTube", "https://www.google.com/")).toBe(
+          "https://www.youtube.com/",
+        );
+        expect(resolveSiteAnchor("open a video on YouTube", "https://example.com/")).toBe(
+          "https://www.youtube.com/",
+        );
+        expect(resolveSiteAnchor("play the 3rd video", "https://www.youtube.com/watch?v=x")).toBeNull();
+      });
+
+      it("stays put when already there, unknown, or no site named", () => {
+        expect(resolveSiteAnchor("play Baby on YouTube", "https://www.youtube.com/results")).toBeNull();
+        expect(resolveSiteAnchor("play Baby", "https://www.google.com/")).toBeNull();
+        expect(resolveSiteAnchor("play Baby on YouTube", null)).toBeNull();
+        expect(resolveSiteAnchor("play Baby on YouTube", "not a url")).toBeNull();
+      });
+
+      it("navigates to the named homepage when the model decides to (free will)", async () => {
+        const h = makeHarness({
+          outcomes: [
+            {
+              type: "action",
+              action: {
+                action: "navigate",
+                parameters: { url: "https://www.youtube.com/" },
+                expect: { type: "navigation_completed" },
+              },
+            },
+            { type: "task_complete", text: "Done." },
+          ],
+          tabUrl: "https://www.google.com/",
+        });
+        await h.controller.routeVoice(voice("play Baby song on YouTube"), 7);
+        expect(h.executed[0]).toEqual({ action: "navigate", target: undefined, value: undefined, url: "https://www.youtube.com/" });
+        expect(h.spoken.some((s) => /open.*youtube.*first|which.*url/i.test(s.text))).toBe(false);
+        expect(h.current()?.status).toBe("COMPLETE");
       });
     });
 
@@ -289,14 +361,14 @@ describe("Q&A and simple action flows", () => {
 
       it("waits for the navigated page snapshot before continuing", async () => {
         const h = makeHarness({ settleResult: true, outcomes: NAVIGATE_THEN_DONE });
-        await h.controller.routeVoice(voice("find music videos"), 7);
+        await h.controller.routeVoice(voice("find music videos on YouTube"), 7);
         expect(h.settleCalls).toEqual([{ tabId: 7, url: "https://www.youtube.com/" }]);
         expect(h.current()?.status).toBe("COMPLETE");
       });
 
       it("warns the next step instead of wedging when the snapshot never arrives", async () => {
         const h = makeHarness({ settleResult: false, outcomes: NAVIGATE_THEN_DONE });
-        await h.controller.routeVoice(voice("find music videos"), 7);
+        await h.controller.routeVoice(voice("find music videos on YouTube"), 7);
         expect(h.settleCalls).toHaveLength(1);
         expect(h.current()?.status).toBe("COMPLETE");
         expect(h.current()?.lastVerifiedResult ?? "").toContain("re-observe before acting");

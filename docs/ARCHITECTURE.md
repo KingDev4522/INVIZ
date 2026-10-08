@@ -352,22 +352,23 @@ Design lineage: plan-then-commit (deterministic navigation, model for the
 rest), snapshot-per-step, explicit `task_complete`, history + budgets,
 confirmation-or-power-mode gating, frontier-model floor for agency.
 
-### 3.7 Sparse vision fallback (P0-1, opt-in, AX-first)
+### 3.7 Hybrid vision (opt-in, AX-first, screenshot-alongside)
 
-Previously undocumented experimental channel, now specified:
+Experimental channel: in hybrid mode the screenshot rides along on every
+step; the DOM snapshot stays the authority and the text-only path is the
+degrade fallback — never the other way round.
 
 - **Gating (both ends):** extension `config:user → contextMode` **and**
   backend `CONTEXT_MODE` must both read `hybrid`. Either end at `dom`
   (the default) keeps the exact text-only path — no pixels captured,
   attached, or forwarded.
-- **Sparse-trigger only:** per step, `assessSnapshotSparsity()` flags a
-  snapshot sparse when it is empty, has ≤8 targets
-  (`SPARSE_MAX_ITEMS`), or has ≥50% unnamed controls
-  (`SPARSE_UNNAMED_FRACTION`). Dense steps stay text-only even in
-  hybrid mode. The check and its values (`itemCount`, `unnamedCount`,
-  `unnamedFraction`, `sparse`, `reason`) are logged on every step.
-- **AX-first, never a swap:** sparse steps keep the **full** AX text
-  (`serializePage`, byte-identical to the text path) and **attach** the
+- **Attach policy:** every hybrid step attaches the viewport screenshot —
+  dense or sparse. `assessSnapshotSparsity()` still runs per step (empty /
+  ≤8 targets / ≥50% unnamed) but only as a diagnostic: its values
+  (`itemCount`, `unnamedCount`, `unnamedFraction`, `sparse`, `reason`)
+  are logged on every step so you can see which steps needed vision most.
+- **AX-first, never a swap:** every step keeps the **full** AX text
+  (`serializePage`, byte-identical to the text path) and **attaches** the
   viewport screenshot next to it. The compact registry is not used on
   this path. `eNN` ids stay the sole executable targets.
 - **Capture:** active-tab-only `chrome.tabs.captureVisibleTab`, downscaled

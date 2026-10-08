@@ -277,9 +277,12 @@ function build(outcomes: AgentOutcome[], searchResults: SearchResultItem[] = [])
 
 const last = (built: Built): TaskSnapshot | undefined => built.saved[built.saved.length - 1];
 
-describe("controller strategy wiring", () => {
-  it("search+open goal records strategies and pending open_matching_result routing", async () => {
-    const built = build([{ type: "task_complete" }]);
+describe("controller strategy wiring — free will (model decides)", () => {
+  it("search+open goal records strategies and pending open_matching_result routing when the model searches", async () => {
+    const built = build([
+      { type: "action", action: { action: "browser_search", parameters: { query: "Tesla" } } },
+      { type: "task_complete" },
+    ]);
     await built.controller.routeVoice(voice("Search for Tesla and open the official website."), 3);
     expect(built.executed[0]).toBe("browser_search");
     const task = last(built);
@@ -287,14 +290,18 @@ describe("controller strategy wiring", () => {
     expect(task?.pendingResultRouting?.continuation).toBe("open_matching_result");
     expect(task?.lastVerifiedResult ?? "").toContain("[strategy: general_web]");
   });
-  it("search-only goal owes no follow-up (pending routing is null)", async () => {
-    const built = build([{ type: "task_complete" }]);
+  it("search-only goal owes no follow-up when the model searches (pending routing is null)", async () => {
+    const built = build([
+      { type: "action", action: { action: "browser_search", parameters: { query: "Tesla" } } },
+      { type: "task_complete" },
+    ]);
     await built.controller.routeVoice(voice("Search for Tesla."), 3);
     const task = last(built);
     expect(task?.pendingResultRouting).toBeNull();
   });
   it("a verified follow-up action consumes the pending routing", async () => {
     const built = build([
+      { type: "action", action: { action: "browser_search", parameters: { query: "Tesla" } } },
       {
         type: "action",
         action: {
@@ -326,8 +333,11 @@ describe("controller strategy wiring", () => {
     expect(task?.lastVerifiedResult ?? "").toContain("[result types:");
     expect(task?.searchStrategies).toEqual(["research"]);
   });
-  it("video goal records open_and_play routing after browser search", async () => {
-    const built = build([{ type: "task_complete" }]);
+  it("video goal records open_and_play routing when the model searches", async () => {
+    const built = build([
+      { type: "action", action: { action: "browser_search", parameters: { query: "Baby Justin Bieber" } } },
+      { type: "task_complete" },
+    ]);
     await built.controller.routeVoice(voice("Search for Baby by Justin Bieber and play it."), 3);
     const task = last(built);
     expect(task?.searchStrategies).toEqual(["video"]);

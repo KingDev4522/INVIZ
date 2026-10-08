@@ -46,6 +46,22 @@ function stripThink(text: string): string {
 }
 
 /**
+ * Spoken-output brevity cap: at most two sentences.
+ *
+ * The prompt orders this, but prompts are preferences, not enforcement — so a
+ * long answer is trimmed here instead of rejected (rejecting would burn the
+ * single corrective re-ask on verbosity). Fragment without terminal
+ * punctuation counts as one sentence and passes through.
+ */
+export function trimToTwoSentences(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed === "") return trimmed;
+  const sentences = trimmed.match(/[^.!?…]+[.!?…]+["'”’)\]]*|[^.!?…]+$/gu);
+  if (sentences === null || sentences.length <= 2) return trimmed;
+  return `${sentences[0]}${sentences[1]}`.trim();
+}
+
+/**
  * Returns balanced top-level JSON objects found in `text`, in order.
  * Brace counting is string-aware so braces inside values cannot end the
  * object early, and every `{` is tried as a start so an unbalanced brace in
@@ -188,7 +204,7 @@ export function validateModelOutput(raw: unknown): AgentOutcome {
 
   switch (obj["type"]) {
     case "answer": {
-      const text = requiredText(obj, "text", 4000);
+      const text = trimToTwoSentences(requiredText(obj, "text", 4000));
       return { type: "answer", text };
     }
     case "ask_user": {
@@ -243,12 +259,12 @@ export function validateModelOutput(raw: unknown): AgentOutcome {
         if (typeof obj["summary"] !== "string") {
           throw new ModelOutputError("\"summary\" must be a string");
         }
-        out.text = obj["summary"].slice(0, 1000);
+        out.text = trimToTwoSentences(obj["summary"].slice(0, 1000));
       }
       return out;
     }
     case "cannot_complete": {
-      const reason = requiredText(obj, "reason", 500);
+      const reason = trimToTwoSentences(requiredText(obj, "reason", 500));
       return { type: "cannot_complete", reason };
     }
     case "skill": {

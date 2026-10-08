@@ -153,10 +153,11 @@ export const QWEN_JSON_MODE = true;
  * could spend a quarter of the minute's budget on reasoning that returns a
  * handful of JSON fields, which is what produced the constant
  * "too many requests". These caps fit a small validated outcome while leaving
- * room for several turns per minute.
+ * room for several turns per minute. Kept tight on purpose: spoken answers are
+ * capped at two sentences, so a small cap also answers faster.
  */
-export const QWEN_MAX_COMPLETION_TOKENS_INTERACTIVE = 600;
-export const QWEN_MAX_COMPLETION_TOKENS_ENRICHMENT = 400;
+export const QWEN_MAX_COMPLETION_TOKENS_INTERACTIVE = 280;
+export const QWEN_MAX_COMPLETION_TOKENS_ENRICHMENT = 250;
 /** Extra room granted to the corrective re-ask after a rejected reply. */
 export const QWEN_CONTRACT_RETRY_HEADROOM = 250;
 /**
