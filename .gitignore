@@ -55,6 +55,11 @@ coverage/
 **/.vite/
 .vitest/
 
+# Python bytecode (harness/ native-messaging sidecar)
+__pycache__/
+*.py[cod]
+*.pyo
+
 # AI Agent / Dev Tools Local State
 .kilo/
 .kilocode/

@@ -22,6 +22,7 @@ import {
   SYSTEM_PROMPT_VERSION,
 } from "./schemas.js";
 import { validateModelOutput } from "../../../shared/response-validator.js";
+import { ACTION_TYPES } from "../../../shared/types.js";
 
 /**
  * Collapses every whitespace run to a single space so assertions are insensitive
@@ -78,23 +79,22 @@ describe("SYSTEM_PROMPT_V2 preserves the closed action-object key allowlist", ()
   });
 
   it("lists every action type the code accepts", () => {
-    for (const action of [
-      "click",
-      "type",
-      "focus",
-      "select",
-      "scroll",
-      "press_key",
-      "navigate",
-      "go_back",
-      "go_forward",
-      "open_tab",
-      "close_tab",
-      "read",
-      "web_search",
-    ]) {
-      expect(SYSTEM_PROMPT_V2).toContain(action);
+    // Derived from the source of truth, not hand-copied: adding an action type to
+    // shared/types.ts without documenting it here is how a whole capability
+    // (browser_search, PRD 6.10) becomes silently unreachable to the model.
+    for (const action of ACTION_TYPES) {
+      expect(flat(), `action type "${action}" missing from the prompt`).toContain(action);
     }
+  });
+
+  it("documents the browser_search vs web_search distinction (PRD 6.10)", () => {
+    expect(flat()).toContain("BROWSER-LEVEL SEARCH");
+    expect(flat()).toContain('"action":"browser_search"');
+    expect(flat()).toContain('the word "search" on its own NEVER means web research');
+    expect(flat()).toContain("browser_search, web_search");
+    // Query construction examples from PRD 6.10 section 9.
+    expect(flat()).toContain('"search for baby by justin bieber" -> "baby justin bieber"');
+    expect(flat()).toContain("400 characters or fewer");
   });
 });
 

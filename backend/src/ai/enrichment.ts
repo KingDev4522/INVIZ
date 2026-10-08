@@ -7,7 +7,7 @@
  */
 import type { GroqKeyPool } from "../gateway/gateway.js";
 import { reasonOnce } from "./qwen-client.js";
-import { SYSTEM_PROMPT_V1 } from "./schemas.js";
+import { SYSTEM_PROMPT_V2 } from "./schemas.js";
 import { buildUserPayload } from "../../../shared/api.js";
 import { QWEN_MAX_COMPLETION_TOKENS_ENRICHMENT } from "../../../shared/constants.js";
 import type { LayerB } from "../../../shared/api.js";
@@ -29,7 +29,7 @@ export async function enrichPage(input: EnrichmentInput): Promise<LayerB> {
     ...(input.openrouter !== undefined ? { openrouter: input.openrouter } : {}),
     ...(input.ollama !== undefined ? { ollama: input.ollama } : {}),
     ...(input.llmProvider !== undefined ? { llmProvider: input.llmProvider } : {}),
-    systemPrompt: SYSTEM_PROMPT_V1,
+    systemPrompt: SYSTEM_PROMPT_V2,
     userPayload: buildUserPayload({
       intent:
         "Summarize this page for an accessibility assistant: its purpose, its important sections, and the important actions a user can take. " +
